@@ -14,6 +14,7 @@ from src.network.conv_based.AttU_Net import AttU_Net
 from src.network.conv_based.CMUNet import CMUNet
 from src.network.conv_based.CMUNeXt import cmunext
 from src.network.conv_based.CMUNeXt_BA_DualGAG import cmunext_ba_dualgag
+from src.network.conv_based.CMUNeXt_BA_DualGAG_SpeckleEnhance import cmunext_ba_dualgag_speckleenhance
 from src.network.conv_based.CMUNeXt_DualGAG import cmunext_dualgag
 from src.network.conv_based.CMUNeXt_DualGAG_SpeckleEnhance import cmunext_dualgag_speckleenhance
 from src.network.conv_based.CMUNeXt_SpeckleEnhance import cmunext_speckle
@@ -79,6 +80,16 @@ def build_model(args):
         model = cmunext_dualgag(num_classes=args.num_classes, gag_stages=args.gag_stages)
     elif args.model == "CMUNeXt_BA_DualGAG":
         model = cmunext_ba_dualgag(num_classes=args.num_classes, gag_stages=args.gag_stages)
+    elif args.model == "CMUNeXt_BA_DualGAG_SpeckleEnhance":
+        model = cmunext_ba_dualgag_speckleenhance(
+            num_classes=args.num_classes,
+            ddsr_stages=args.ddsr_stages,
+            gag_stages=args.gag_stages,
+            ddsr_smooth_k=args.ddsr_smooth_k,
+            ddsr_max_scale=args.ddsr_max_scale,
+            ddsr_skip_only=args.ddsr_mode == "skip_only",
+            ddsr_aux_init=args.ddsr_aux_init,
+        )
     elif args.model == "CMUNeXt_SpeckleEnhance":
         model = cmunext_speckle(
             num_classes=args.num_classes,
@@ -260,6 +271,7 @@ if __name__ == "__main__":
     model_choices = [
         "CMUNet", "CMUNeXt", "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
         "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
+        "CMUNeXt_BA_DualGAG_SpeckleEnhance",
         "U_Net", "AttU_Net", "UNext", "UNetplus", "UNet3plus",
         "TransUnet", "SwinUnet", "MedT", "Mobile_U_ViT",
     ]
@@ -316,7 +328,7 @@ if __name__ == "__main__":
     )
     val_loader = DataLoader(db_val, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
-    if args.model == "CMUNeXt_BA_DualGAG":
+    if args.model in {"CMUNeXt_BA_DualGAG", "CMUNeXt_BA_DualGAG_SpeckleEnhance"}:
         criterion = losses.__dict__["BoundaryAwareSegLoss"](lambda_b=args.boundary_loss_weight).to(device)
     else:
         criterion = losses.__dict__["BCEDiceLoss"]().to(device)
