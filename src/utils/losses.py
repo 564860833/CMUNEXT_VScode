@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-__all__ = ['BCEDiceLoss']
+__all__ = ['BCEDiceLoss', 'DiceBCELoss', 'SobelBoundaryLoss', 'BoundaryAwareSegLoss']
 
 
 class BCEDiceLoss(nn.Module):
@@ -21,6 +21,83 @@ class BCEDiceLoss(nn.Module):
         dice = (2. * intersection.sum(1) + smooth) / (input.sum(1) + target.sum(1) + smooth)
         dice = 1 - dice.sum() / num
         return 0.5 * bce + dice
+
+
+class DiceBCELoss(nn.Module):
+    def __init__(self, smooth=1e-5):
+        super().__init__()
+        self.smooth = smooth
+
+    def forward(self, input, target):
+        bce = F.binary_cross_entropy_with_logits(input, target)
+        prob = torch.sigmoid(input)
+        num = target.size(0)
+        prob = prob.view(num, -1)
+        target = target.view(num, -1)
+        intersection = prob * target
+        dice = (2. * intersection.sum(1) + self.smooth) / (
+            prob.sum(1) + target.sum(1) + self.smooth
+        )
+        dice = 1 - dice.sum() / num
+        return bce + dice
+
+
+class SobelBoundaryLoss(nn.Module):
+    def __init__(self, smooth=1e-5, eps=1e-6):
+        super().__init__()
+        self.smooth = smooth
+        self.eps = eps
+        sobel_x = torch.tensor(
+            [[[-1., 0., 1.],
+              [-2., 0., 2.],
+              [-1., 0., 1.]]]
+        ).unsqueeze(0)
+        sobel_y = torch.tensor(
+            [[[-1., -2., -1.],
+              [0., 0., 0.],
+              [1., 2., 1.]]]
+        ).unsqueeze(0)
+        self.register_buffer('sobel_x', sobel_x)
+        self.register_buffer('sobel_y', sobel_y)
+
+    def _sobel_edges(self, mask):
+        channels = mask.shape[1]
+        sobel_x = self.sobel_x.to(dtype=mask.dtype, device=mask.device).repeat(channels, 1, 1, 1)
+        sobel_y = self.sobel_y.to(dtype=mask.dtype, device=mask.device).repeat(channels, 1, 1, 1)
+        grad_x = F.conv2d(mask, sobel_x, padding=1, groups=channels)
+        grad_y = F.conv2d(mask, sobel_y, padding=1, groups=channels)
+        edge = torch.sqrt(grad_x.pow(2) + grad_y.pow(2) + self.eps)
+        return torch.clamp(edge / 4.0, min=0.0, max=1.0)
+
+    def forward(self, input, target):
+        prob = torch.sigmoid(input)
+        target = target.float().clamp(0.0, 1.0)
+        pred_edge = self._sobel_edges(prob).clamp(self.eps, 1.0 - self.eps)
+        target_edge = self._sobel_edges(target).detach()
+
+        bce = F.binary_cross_entropy(pred_edge, target_edge)
+        num = target.size(0)
+        pred_edge = pred_edge.view(num, -1)
+        target_edge = target_edge.view(num, -1)
+        intersection = pred_edge * target_edge
+        dice = (2. * intersection.sum(1) + self.smooth) / (
+            pred_edge.sum(1) + target_edge.sum(1) + self.smooth
+        )
+        dice = 1 - dice.sum() / num
+        return bce + dice
+
+
+class BoundaryAwareSegLoss(nn.Module):
+    def __init__(self, lambda_b=0.3):
+        super().__init__()
+        self.lambda_b = float(lambda_b)
+        self.seg_loss = DiceBCELoss()
+        self.boundary_loss = SobelBoundaryLoss()
+
+    def forward(self, input, target):
+        loss_seg = self.seg_loss(input, target)
+        loss_bnd = self.boundary_loss(input, target)
+        return loss_seg + self.lambda_b * loss_bnd
 
 
 def compute_kl_loss(p, q):

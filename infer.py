@@ -13,6 +13,7 @@ from src.utils.metrics import iou_score, boundary_scores, find_best_threshold
 from src.network.conv_based.AttU_Net import AttU_Net
 from src.network.conv_based.CMUNet import CMUNet
 from src.network.conv_based.CMUNeXt import cmunext
+from src.network.conv_based.CMUNeXt_BA_DualGAG import cmunext_ba_dualgag
 from src.network.conv_based.CMUNeXt_DualGAG import cmunext_dualgag
 from src.network.conv_based.CMUNeXt_DualGAG_SpeckleEnhance import cmunext_dualgag_speckleenhance
 from src.network.conv_based.CMUNeXt_SpeckleEnhance import cmunext_speckle
@@ -76,6 +77,8 @@ def build_model(args):
         model = cmunext(num_classes=args.num_classes)
     elif args.model == "CMUNeXt_DualGAG":
         model = cmunext_dualgag(num_classes=args.num_classes, gag_stages=args.gag_stages)
+    elif args.model == "CMUNeXt_BA_DualGAG":
+        model = cmunext_ba_dualgag(num_classes=args.num_classes, gag_stages=args.gag_stages)
     elif args.model == "CMUNeXt_SpeckleEnhance":
         model = cmunext_speckle(
             num_classes=args.num_classes,
@@ -255,7 +258,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Validation script for medical image segmentation")
 
     model_choices = [
-        "CMUNet", "CMUNeXt", "CMUNeXt_DualGAG",
+        "CMUNet", "CMUNeXt", "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
         "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
         "U_Net", "AttU_Net", "UNext", "UNetplus", "UNet3plus",
         "TransUnet", "SwinUnet", "MedT", "Mobile_U_ViT",
@@ -280,6 +283,8 @@ if __name__ == "__main__":
                         help="Use DDSR only for decoder skips or propagate it through the encoder")
     parser.add_argument("--gag_stages", type=parse_gag_stages, default=(2, 3),
                         help="Comma-separated DualGAG stages, e.g. 0,1 or 1,3 or 0,1,2,3")
+    parser.add_argument("--boundary_loss_weight", type=float, default=0.3,
+                        help="Boundary loss weight for CMUNeXt_BA_DualGAG")
     parser.add_argument("--val_threshold_mode", type=str, default="fixed", choices=["fixed", "scan"],
                         help="Use a fixed validation threshold or scan a threshold range")
     parser.add_argument("--val_threshold", type=float, default=0.5,
@@ -311,7 +316,10 @@ if __name__ == "__main__":
     )
     val_loader = DataLoader(db_val, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
-    criterion = losses.__dict__["BCEDiceLoss"]().to(device)
+    if args.model == "CMUNeXt_BA_DualGAG":
+        criterion = losses.__dict__["BoundaryAwareSegLoss"](lambda_b=args.boundary_loss_weight).to(device)
+    else:
+        criterion = losses.__dict__["BCEDiceLoss"]().to(device)
     save_directory = os.path.join(os.path.dirname(args.model_path), f"predictions_{args.model}")
     print(f"Saving predictions to: {save_directory}")
     validate(model, val_loader, criterion, device, args=args, save_dir=save_directory)

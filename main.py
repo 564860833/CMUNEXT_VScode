@@ -28,6 +28,7 @@ from src.network.conv_based.UNeXt import UNext
 from src.network.conv_based.UNetplus import ResNet34UnetPlus
 from src.network.conv_based.UNet3plus import UNet3plus
 from src.network.conv_based.CMUNeXt import cmunext
+from src.network.conv_based.CMUNeXt_BA_DualGAG import cmunext_ba_dualgag
 from src.network.conv_based.CMUNeXt_DualGAG import cmunext_dualgag
 from src.network.conv_based.CMUNeXt_SpeckleEnhance import cmunext_speckle
 from src.network.conv_based.CMUNeXt_DualGAG_SpeckleEnhance import cmunext_dualgag_speckleenhance
@@ -99,7 +100,7 @@ def parse_gag_stages(value):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default="CMUNeXt",
-                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_DualGAG",
+                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
                              "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
                              "CMUNet", "AttU_Net", "TransUnet", "R2U_Net", "U_Net",
                              "UNext", "UNetplus", "UNet3plus", "SwinUnet", "MedT", "TransUnet"], help='model')
@@ -127,6 +128,8 @@ parser.add_argument('--ddsr_aux_init', type=float, default=0.1,
                     help='Initial DDSR auxiliary residual blend for DualGAG_SpeckleEnhance')
 parser.add_argument('--gag_stages', type=parse_gag_stages, default=(2, 3),
                     help='Comma-separated DualGAG stages, e.g. 0,1 or 1,3 or 0,1,2,3')
+parser.add_argument('--boundary_loss_weight', type=float, default=0.3,
+                    help='Boundary loss weight for CMUNeXt_BA_DualGAG')
 parser.add_argument('--val_threshold_mode', type=str, default="fixed", choices=["fixed", "scan"],
                     help='Use a fixed validation threshold or scan a threshold range')
 parser.add_argument('--val_threshold', type=float, default=0.5,
@@ -150,6 +153,8 @@ def get_model(args):
         model = cmunext(num_classes=args.num_classes).cuda()
     elif args.model == "CMUNeXt_DualGAG":
         model = cmunext_dualgag(num_classes=args.num_classes, gag_stages=args.gag_stages).cuda()
+    elif args.model == "CMUNeXt_BA_DualGAG":
+        model = cmunext_ba_dualgag(num_classes=args.num_classes, gag_stages=args.gag_stages).cuda()
     elif args.model == "CMUNeXt_SpeckleEnhance":
         model = cmunext_speckle(
             num_classes=args.num_classes,
@@ -187,6 +192,8 @@ def get_model(args):
 
 
 def get_criterion(args):
+    if args.model == "CMUNeXt_BA_DualGAG":
+        return losses.__dict__['BoundaryAwareSegLoss'](lambda_b=args.boundary_loss_weight).cuda()
     return losses.__dict__['BCEDiceLoss']().cuda()
 
 
