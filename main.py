@@ -539,7 +539,9 @@ if __name__ == "__main__":
 
 
 
-#  git pull origin main
+#  git add .
+#  git commit -m "提交信息"
+
 #  libgomp: Invalid value for environment variable OMP_NUM_THREADS：     echo $OMP_NUM_THREADS    export OMP_NUM_THREADS=4
 #  15
 #  启动数据增强     --use_extra_aug
