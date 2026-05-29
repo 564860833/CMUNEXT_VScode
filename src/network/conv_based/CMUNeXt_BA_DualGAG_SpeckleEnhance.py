@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-from src.network.conv_based.CMUNeXt_BA_DualGAG import _make_ba_gag
+from src.network.conv_based.CMUNeXt_BA_DualGAG import BoundaryAwareDualGatedAttentionGate
 from src.network.conv_based.CMUNeXt_DualGAG import (
     CMUNeXtBlock,
     _normalize_gag_stages,
@@ -29,6 +30,71 @@ def _normalize_ddsr_stages(ddsr_stages):
     return tuple(stages)
 
 
+class NoiseAwareBoundaryDualGatedAttentionGate(BoundaryAwareDualGatedAttentionGate):
+    def __init__(self, F_g, F_l, F_int, groups=4, reduction=8, residual_init=0.1):
+        super().__init__(F_g=F_g, F_l=F_l, F_int=F_int, groups=groups, reduction=reduction)
+        self.W_r = nn.Sequential(
+            nn.Conv2d(F_l, F_int, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(F_int),
+        )
+        self.r_scale = nn.Parameter(torch.tensor(float(residual_init)))
+
+    def forward(self, g, x, r):
+        fused = self.W_g(g) + self.W_x(x) + torch.tanh(self.r_scale) * self.W_r(r)
+        fused = self.relu(fused)
+        fused = self.refine(fused)
+
+        spatial_gate = torch.sigmoid(self.spatial_gate(fused))
+        spatial_gate = 2.0 * spatial_gate - 1.0
+        spatial_gate = 1.0 + torch.tanh(self.spatial_scale).view(1, self.groups, 1, 1) * spatial_gate
+
+        boundary_prior = fused - F.avg_pool2d(
+            fused,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            count_include_pad=False,
+        )
+        boundary_gate = torch.sigmoid(self.boundary_gate(boundary_prior))
+        boundary_gate = 2.0 * boundary_gate - 1.0
+        boundary_gate = 1.0 + torch.tanh(self.boundary_scale).view(1, self.groups, 1, 1) * boundary_gate
+
+        boundary_mix = torch.sigmoid(self.boundary_mix).view(1, self.groups, 1, 1)
+        joint_gate = spatial_gate + boundary_mix * (boundary_gate - 1.0)
+        spatial_mod = self._expand_group_gate(joint_gate, x)
+
+        channel_gate = self.channel_mlp(self.avg_pool(fused)) + self.channel_mlp(self.max_pool(fused))
+        channel_gate = torch.sigmoid(channel_gate)
+        channel_gate = 2.0 * channel_gate - 1.0
+        channel_gate = 1.0 + torch.tanh(self.channel_scale) * channel_gate
+
+        return x * spatial_mod * channel_gate
+
+
+def _make_noise_aware_ba_gag(stage, dims, residual_init=0.1):
+    if stage == 3:
+        return NoiseAwareBoundaryDualGatedAttentionGate(
+            F_g=dims[3], F_l=dims[3], F_int=max(8, dims[3] // 2), groups=4,
+            residual_init=residual_init,
+        )
+    if stage == 2:
+        return NoiseAwareBoundaryDualGatedAttentionGate(
+            F_g=dims[2], F_l=dims[2], F_int=max(8, dims[2] // 2), groups=4,
+            residual_init=residual_init,
+        )
+    if stage == 1:
+        return NoiseAwareBoundaryDualGatedAttentionGate(
+            F_g=dims[1], F_l=dims[1], F_int=max(8, dims[1] // 2), groups=4,
+            residual_init=residual_init,
+        )
+    if stage == 0:
+        return NoiseAwareBoundaryDualGatedAttentionGate(
+            F_g=dims[0], F_l=dims[0], F_int=max(8, dims[0] // 2), groups=2,
+            residual_init=residual_init,
+        )
+    raise ValueError(f"Unsupported noise-aware BA-DualGAG stage: {stage}")
+
+
 class CMUNeXt_BA_DualGAG_SpeckleEnhance(nn.Module):
     def __init__(
         self,
@@ -43,6 +109,7 @@ class CMUNeXt_BA_DualGAG_SpeckleEnhance(nn.Module):
         ddsr_max_scale=0.05,
         ddsr_skip_only=True,
         ddsr_aux_init=0.1,
+        noise_gag_residual_init=0.1,
         alpha_init_raw=-5.3,
     ):
         super().__init__()
@@ -74,7 +141,11 @@ class CMUNeXt_BA_DualGAG_SpeckleEnhance(nn.Module):
 
         self.gag_modules = nn.ModuleDict()
         for stage in sorted(self.gag_stages):
-            self.gag_modules[str(stage)] = _make_ba_gag(stage, dims)
+            self.gag_modules[str(stage)] = _make_noise_aware_ba_gag(
+                stage,
+                dims,
+                residual_init=noise_gag_residual_init,
+            )
 
         self.Up5 = up_conv(ch_in=dims[4], ch_out=dims[3])
         self.Up_conv5 = fusion_conv(ch_in=dims[3] * 2, ch_out=dims[3])
@@ -92,11 +163,11 @@ class CMUNeXt_BA_DualGAG_SpeckleEnhance(nn.Module):
             return x
         return self.ddsr_modules[key](x)
 
-    def _apply_gag(self, g, x, stage):
+    def _apply_gag(self, g, x, r, stage):
         key = str(stage)
         if key not in self.gag_modules:
             return x
-        return self.gag_modules[key](g=g, x=x)
+        return self.gag_modules[key](g=g, x=x, r=r)
 
     def _merge_skip(self, gated_raw_skip, raw_skip, ddsr_skip, stage):
         key = str(stage)
@@ -104,6 +175,10 @@ class CMUNeXt_BA_DualGAG_SpeckleEnhance(nn.Module):
             return gated_raw_skip
         scale = torch.tanh(self.ddsr_aux_scales[key])
         return gated_raw_skip + scale * (ddsr_skip - raw_skip)
+
+    @staticmethod
+    def _ddsr_residual(raw_skip, ddsr_skip):
+        return ddsr_skip - raw_skip
 
     def forward(self, x):
         x1 = self.stem(x)
@@ -130,22 +205,26 @@ class CMUNeXt_BA_DualGAG_SpeckleEnhance(nn.Module):
         x5 = self.encoder5(x5)
 
         d5 = self.Up5(x5)
-        x4_p = self._apply_gag(d5, x4, 3)
+        r4 = self._ddsr_residual(x4, s4)
+        x4_p = self._apply_gag(d5, x4, r4, 3)
         x4_p = self._merge_skip(x4_p, x4, s4, 3)
         d5 = self.Up_conv5(torch.cat((x4_p, d5), dim=1))
 
         d4 = self.Up4(d5)
-        x3_p = self._apply_gag(d4, x3, 2)
+        r3 = self._ddsr_residual(x3, s3)
+        x3_p = self._apply_gag(d4, x3, r3, 2)
         x3_p = self._merge_skip(x3_p, x3, s3, 2)
         d4 = self.Up_conv4(torch.cat((x3_p, d4), dim=1))
 
         d3 = self.Up3(d4)
-        x2_p = self._apply_gag(d3, x2, 1)
+        r2 = self._ddsr_residual(x2, s2)
+        x2_p = self._apply_gag(d3, x2, r2, 1)
         x2_p = self._merge_skip(x2_p, x2, s2, 1)
         d3 = self.Up_conv3(torch.cat((x2_p, d3), dim=1))
 
         d2 = self.Up2(d3)
-        x1_p = self._apply_gag(d2, x1, 0)
+        r1 = self._ddsr_residual(x1, s1)
+        x1_p = self._apply_gag(d2, x1, r1, 0)
         x1_p = self._merge_skip(x1_p, x1, s1, 0)
         d2 = self.Up_conv2(torch.cat((x1_p, d2), dim=1))
 
@@ -161,6 +240,7 @@ def cmunext_ba_dualgag_speckleenhance(
     ddsr_max_scale=0.05,
     ddsr_skip_only=True,
     ddsr_aux_init=0.1,
+    noise_gag_residual_init=0.1,
 ):
     return CMUNeXt_BA_DualGAG_SpeckleEnhance(
         input_channel=input_channel,
@@ -174,6 +254,7 @@ def cmunext_ba_dualgag_speckleenhance(
         ddsr_max_scale=ddsr_max_scale,
         ddsr_skip_only=ddsr_skip_only,
         ddsr_aux_init=ddsr_aux_init,
+        noise_gag_residual_init=noise_gag_residual_init,
         alpha_init_raw=-5.3,
     )
 
@@ -191,6 +272,7 @@ def cmunext_ba_dualgag_speckleenhance_full(input_channel=3, num_classes=1):
         ddsr_max_scale=0.05,
         ddsr_skip_only=True,
         ddsr_aux_init=0.1,
+        noise_gag_residual_init=0.1,
         alpha_init_raw=-5.3,
     )
 
@@ -204,6 +286,7 @@ def cmunext_ba_dualgag_speckleenhance_s(
     ddsr_max_scale=0.05,
     ddsr_skip_only=True,
     ddsr_aux_init=0.1,
+    noise_gag_residual_init=0.1,
 ):
     return CMUNeXt_BA_DualGAG_SpeckleEnhance(
         input_channel=input_channel,
@@ -217,6 +300,7 @@ def cmunext_ba_dualgag_speckleenhance_s(
         ddsr_max_scale=ddsr_max_scale,
         ddsr_skip_only=ddsr_skip_only,
         ddsr_aux_init=ddsr_aux_init,
+        noise_gag_residual_init=noise_gag_residual_init,
         alpha_init_raw=-5.3,
     )
 
@@ -230,6 +314,7 @@ def cmunext_ba_dualgag_speckleenhance_l(
     ddsr_max_scale=0.05,
     ddsr_skip_only=True,
     ddsr_aux_init=0.1,
+    noise_gag_residual_init=0.1,
 ):
     return CMUNeXt_BA_DualGAG_SpeckleEnhance(
         input_channel=input_channel,
@@ -243,5 +328,6 @@ def cmunext_ba_dualgag_speckleenhance_l(
         ddsr_max_scale=ddsr_max_scale,
         ddsr_skip_only=ddsr_skip_only,
         ddsr_aux_init=ddsr_aux_init,
+        noise_gag_residual_init=noise_gag_residual_init,
         alpha_init_raw=-5.3,
     )
