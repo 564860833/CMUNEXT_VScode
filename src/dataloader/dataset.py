@@ -80,5 +80,12 @@ class MedicalDataSets(Dataset):
         label = label.astype('float32') / 255
         label = label.transpose(2, 0, 1)
 
-        sample = {"image": image, "label": label, "idx": idx}
+        sample = {
+            "image": image,
+            "label": label,
+            "idx": idx,
+            "case_name": case,
+            "image_path": image_path,
+            "mask_path": mask_path,
+        }
         return sample
