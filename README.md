@@ -24,6 +24,7 @@ This repositories has collected and re-implemented medical image segmentation ne
 |    SwinUnet     |    [Pytorch](https://github.com/HuCaoFighting/Swin-Unet)     |       [ECCV'22](https://arxiv.org/pdf/2105.05537.pdf)        |
 |     CMU-Net     |       [Pytorch](https://github.com/FengheTan9/CMU-Net)       |       [ISBI'23](https://arxiv.org/pdf/2210.13012.pdf)        |
 |     CMUNeXt     |       [Pytorch](https://github.com/FengheTan9/CMUNeXt)       |       [ISBI'24](https://arxiv.org/pdf/2308.01239.pdf)       |
+|     MK-UNet     |       [Pytorch](https://github.com/SLDGroup/MK-UNet)         |       [ICCVW'25](https://openaccess.thecvf.com/content/ICCV2025W/CVAMD/papers/Rahman_MK-UNet_Multi-kernel_Lightweight_CNN_for_Medical_Image_Segmentation_ICCVW_2025_paper.pdf) |
 |  Mobile U-ViT   |       [Pytorch](https://github.com/FengheTan9/Mobile-U-ViT)  |       [ACM MM'25](https://arxiv.org/pdf/2508.01064.pdf)       |
 ## Datasets
 
@@ -80,13 +81,13 @@ python split.py --dataset_root ./data --dataset_name busi
 Then, training and validating your dataset:
 
 ```python
-python main.py --model [MobileUViT/CMUNeXt/CMUNet/TransUnet/...] --base_dir ./data/busi --train_file_dir busi_train.txt --val_file_dir busi_val.txt --base_lr 0.01 --epoch 300 --batch_size 8
+python main.py --model [MobileUViT/CMUNeXt/CMUNet/MK_UNet/TransUnet/...] --base_dir ./data/busi --train_file_dir busi_train.txt --val_file_dir busi_val.txt --base_lr 0.01 --epoch 300 --batch_size 8
 ```
 
 ## Inference
 
 ```python
-python infer.py --model [MobileUViT/CMUNeXt/CMUNet/TransUnet/...] --model_path [.pth] --base_dir ./data/busi --val_file_dir busi_val.txt --img_size 256 --num_classes 1
+python infer.py --model [MobileUViT/CMUNeXt/CMUNet/MK_UNet/TransUnet/...] --model_path [.pth] --base_dir ./data/busi --val_file_dir busi_val.txt --img_size 256 --num_classes 1
 ```
 
 

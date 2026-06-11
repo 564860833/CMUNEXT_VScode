@@ -19,6 +19,7 @@ from src.network.conv_based.CMUNeXt_BA_DualGAG_SpeckleEnhance import cmunext_ba_
 from src.network.conv_based.CMUNeXt_DualGAG import cmunext_dualgag
 from src.network.conv_based.CMUNeXt_DualGAG_SpeckleEnhance import cmunext_dualgag_speckleenhance
 from src.network.conv_based.CMUNeXt_SpeckleEnhance import cmunext_speckle
+from src.network.conv_based.MK_UNet import MK_UNet
 from src.network.conv_based.U_Net import U_Net
 from src.network.conv_based.UNet3plus import UNet3plus
 from src.network.conv_based.UNetplus import ResNet34UnetPlus
@@ -76,6 +77,8 @@ def parse_ddsr_stages(value):
 def build_model(args, parser):
     if args.model == "CMUNet":
         model = CMUNet(output_ch=args.num_classes)
+    elif args.model == "MK_UNet":
+        model = MK_UNet(num_classes=args.num_classes, in_channels=3)
     elif args.model == "CMUNeXt":
         model = cmunext(num_classes=args.num_classes)
     elif args.model == "CMUNeXt_DualGAG":
@@ -474,7 +477,7 @@ if __name__ == "__main__":
         "CMUNet", "CMUNeXt", "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
         "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
         "CMUNeXt_BA_DualGAG_SpeckleEnhance",
-        "U_Net", "AttU_Net", "UNext", "UNetplus", "UNet3plus",
+        "U_Net", "MK_UNet", "AttU_Net", "UNext", "UNetplus", "UNet3plus",
         "TransUnet", "SwinUnet", "MedT", "Mobile_U_ViT",
     ]
     parser.add_argument("--model", type=str, default="U_Net", choices=model_choices, help="model type")

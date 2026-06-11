@@ -33,6 +33,7 @@ from src.network.conv_based.CMUNeXt_BA_DualGAG_SpeckleEnhance import cmunext_ba_
 from src.network.conv_based.CMUNeXt_DualGAG import cmunext_dualgag
 from src.network.conv_based.CMUNeXt_SpeckleEnhance import cmunext_speckle
 from src.network.conv_based.CMUNeXt_DualGAG_SpeckleEnhance import cmunext_dualgag_speckleenhance
+from src.network.conv_based.MK_UNet import MK_UNet
 
 
 
@@ -104,7 +105,7 @@ parser.add_argument('--model', type=str, default="CMUNeXt",
                     choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
                              "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
                              "CMUNeXt_BA_DualGAG_SpeckleEnhance",
-                             "CMUNet", "AttU_Net", "TransUnet", "R2U_Net", "U_Net",
+                             "CMUNet", "MK_UNet", "AttU_Net", "TransUnet", "R2U_Net", "U_Net",
                              "UNext", "UNetplus", "UNet3plus", "SwinUnet", "MedT", "TransUnet"], help='model')
 parser.add_argument('--base_dir', type=str, default="./data/busi", help='dir')
 parser.add_argument('--train_file_dir', type=str, default="busi_train.txt", help='dir')
@@ -151,6 +152,8 @@ seed_torch(args.seed)
 def get_model(args):
     if args.model == "CMUNet":
         model = CMUNet(output_ch=args.num_classes).cuda()
+    elif args.model == "MK_UNet":
+        model = MK_UNet(num_classes=args.num_classes, in_channels=3).cuda()
     elif args.model == "CMUNeXt":
         model = cmunext(num_classes=args.num_classes).cuda()
     elif args.model == "CMUNeXt_DualGAG":
