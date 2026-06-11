@@ -14,6 +14,8 @@ from src.utils.metrics import iou_score, boundary_scores, find_best_threshold
 from src.network.conv_based.AttU_Net import AttU_Net
 from src.network.conv_based.CMUNet import CMUNet
 from src.network.conv_based.CMUNeXt import cmunext
+from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
+from src.network.conv_based.CMUNeXt_HSPM_UBRD import cmunext_hspm_ubrd
 from src.network.conv_based.CMUNeXt_BA_DualGAG import cmunext_ba_dualgag
 from src.network.conv_based.CMUNeXt_BA_DualGAG_SpeckleEnhance import cmunext_ba_dualgag_speckleenhance
 from src.network.conv_based.CMUNeXt_DualGAG import cmunext_dualgag
@@ -81,6 +83,17 @@ def build_model(args, parser):
         model = MK_UNet(num_classes=args.num_classes, in_channels=3)
     elif args.model == "CMUNeXt":
         model = cmunext(num_classes=args.num_classes)
+    elif args.model == "CMUNeXt_HSPM":
+        model = cmunext_hspm(
+            num_classes=args.num_classes,
+            hspm_mode=args.hspm_mode,
+        )
+    elif args.model == "CMUNeXt_HSPM_UBRD":
+        model = cmunext_hspm_ubrd(
+            num_classes=args.num_classes,
+            hspm_mode=args.hspm_mode,
+            ubrd_mode=args.ubrd_mode,
+        )
     elif args.model == "CMUNeXt_DualGAG":
         model = cmunext_dualgag(num_classes=args.num_classes, gag_stages=args.gag_stages)
     elif args.model == "CMUNeXt_BA_DualGAG":
@@ -385,7 +398,10 @@ def validate(model, val_loader, criterion, device, args, save_dir="validation_re
             img_batch, label_batch = img_batch.to(device), label_batch.to(device)
             outputs = forward_with_model(model, args.model, img_batch)
             seg_logits = get_seg_logits(outputs)
-            loss = criterion(seg_logits, label_batch)
+            if args.model in {"CMUNeXt_HSPM", "CMUNeXt_HSPM_UBRD"}:
+                loss = criterion(outputs, label_batch)
+            else:
+                loss = criterion(seg_logits, label_batch)
             probabilities = torch.sigmoid(seg_logits).detach().cpu()
             targets = label_batch.detach().cpu()
 
@@ -474,7 +490,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Validation script for medical image segmentation")
 
     model_choices = [
-        "CMUNet", "CMUNeXt", "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
+        "CMUNet", "CMUNeXt", "CMUNeXt_HSPM", "CMUNeXt_HSPM_UBRD",
+        "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
         "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
         "CMUNeXt_BA_DualGAG_SpeckleEnhance",
         "U_Net", "MK_UNet", "AttU_Net", "UNext", "UNetplus", "UNet3plus",
@@ -504,6 +521,14 @@ if __name__ == "__main__":
                         help="Comma-separated DualGAG stages, e.g. 0,1 or 1,3 or 0,1,2,3")
     parser.add_argument("--boundary_loss_weight", type=float, default=0.3,
                         help="Boundary loss weight for CMUNeXt_BA_DualGAG")
+    parser.add_argument("--hspm_mode", type=str, default="full", choices=["full", "context_only"],
+                        help="Enable the full HSPM or keep only its high-resolution context bottleneck")
+    parser.add_argument("--hspm_coarse_loss_weight", type=float, default=0.3,
+                        help="Auxiliary coarse segmentation loss weight for CMUNeXt_HSPM")
+    parser.add_argument("--ubrd_mode", type=str, default="full", choices=["add_only", "semantic_only", "full"],
+                        help="UBRD ablation mode for CMUNeXt_HSPM_UBRD")
+    parser.add_argument("--ubrd_boundary_loss_weight", type=float, default=0.0,
+                        help="Optional final-prediction boundary loss weight for CMUNeXt_HSPM_UBRD")
     parser.add_argument("--val_threshold_mode", type=str, default="fixed", choices=["fixed", "scan"],
                         help="Use a fixed validation threshold or scan a threshold range")
     parser.add_argument("--val_threshold", type=float, default=0.5,
@@ -542,7 +567,14 @@ if __name__ == "__main__":
     )
     val_loader = DataLoader(db_val, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
-    if args.model in {"CMUNeXt_BA_DualGAG", "CMUNeXt_BA_DualGAG_SpeckleEnhance"}:
+    if args.model == "CMUNeXt_HSPM_UBRD":
+        criterion = losses.__dict__["UBRDLoss"](
+            coarse_weight=args.hspm_coarse_loss_weight,
+            boundary_weight=args.ubrd_boundary_loss_weight,
+        ).to(device)
+    elif args.model == "CMUNeXt_HSPM":
+        criterion = losses.__dict__["HSPMLoss"](coarse_weight=args.hspm_coarse_loss_weight).to(device)
+    elif args.model in {"CMUNeXt_BA_DualGAG", "CMUNeXt_BA_DualGAG_SpeckleEnhance"}:
         criterion = losses.__dict__["BoundaryAwareSegLoss"](lambda_b=args.boundary_loss_weight).to(device)
     else:
         criterion = losses.__dict__["BCEDiceLoss"]().to(device)

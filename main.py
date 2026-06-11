@@ -28,6 +28,8 @@ from src.network.conv_based.UNeXt import UNext
 from src.network.conv_based.UNetplus import ResNet34UnetPlus
 from src.network.conv_based.UNet3plus import UNet3plus
 from src.network.conv_based.CMUNeXt import cmunext
+from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
+from src.network.conv_based.CMUNeXt_HSPM_UBRD import cmunext_hspm_ubrd
 from src.network.conv_based.CMUNeXt_BA_DualGAG import cmunext_ba_dualgag
 from src.network.conv_based.CMUNeXt_BA_DualGAG_SpeckleEnhance import cmunext_ba_dualgag_speckleenhance
 from src.network.conv_based.CMUNeXt_DualGAG import cmunext_dualgag
@@ -102,7 +104,8 @@ def parse_gag_stages(value):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default="CMUNeXt",
-                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
+                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_HSPM", "CMUNeXt_HSPM_UBRD",
+                             "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
                              "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
                              "CMUNeXt_BA_DualGAG_SpeckleEnhance",
                              "CMUNet", "MK_UNet", "AttU_Net", "TransUnet", "R2U_Net", "U_Net",
@@ -133,6 +136,14 @@ parser.add_argument('--gag_stages', type=parse_gag_stages, default=(2, 3),
                     help='Comma-separated DualGAG stages, e.g. 0,1 or 1,3 or 0,1,2,3')
 parser.add_argument('--boundary_loss_weight', type=float, default=0.3,
                     help='Boundary loss weight for CMUNeXt_BA_DualGAG')
+parser.add_argument('--hspm_mode', type=str, default="full", choices=["full", "context_only"],
+                    help='Enable the full HSPM or keep only its high-resolution context bottleneck')
+parser.add_argument('--hspm_coarse_loss_weight', type=float, default=0.3,
+                    help='Auxiliary coarse segmentation loss weight for CMUNeXt_HSPM')
+parser.add_argument('--ubrd_mode', type=str, default="full", choices=["add_only", "semantic_only", "full"],
+                    help='UBRD ablation mode for CMUNeXt_HSPM_UBRD')
+parser.add_argument('--ubrd_boundary_loss_weight', type=float, default=0.0,
+                    help='Optional final-prediction boundary loss weight for CMUNeXt_HSPM_UBRD')
 parser.add_argument('--val_threshold_mode', type=str, default="fixed", choices=["fixed", "scan"],
                     help='Use a fixed validation threshold or scan a threshold range')
 parser.add_argument('--val_threshold', type=float, default=0.5,
@@ -156,6 +167,17 @@ def get_model(args):
         model = MK_UNet(num_classes=args.num_classes, in_channels=3).cuda()
     elif args.model == "CMUNeXt":
         model = cmunext(num_classes=args.num_classes).cuda()
+    elif args.model == "CMUNeXt_HSPM":
+        model = cmunext_hspm(
+            num_classes=args.num_classes,
+            hspm_mode=args.hspm_mode,
+        ).cuda()
+    elif args.model == "CMUNeXt_HSPM_UBRD":
+        model = cmunext_hspm_ubrd(
+            num_classes=args.num_classes,
+            hspm_mode=args.hspm_mode,
+            ubrd_mode=args.ubrd_mode,
+        ).cuda()
     elif args.model == "CMUNeXt_DualGAG":
         model = cmunext_dualgag(num_classes=args.num_classes, gag_stages=args.gag_stages).cuda()
     elif args.model == "CMUNeXt_BA_DualGAG":
@@ -207,6 +229,13 @@ def get_model(args):
 
 
 def get_criterion(args):
+    if args.model == "CMUNeXt_HSPM_UBRD":
+        return losses.__dict__['UBRDLoss'](
+            coarse_weight=args.hspm_coarse_loss_weight,
+            boundary_weight=args.ubrd_boundary_loss_weight,
+        ).cuda()
+    if args.model == "CMUNeXt_HSPM":
+        return losses.__dict__['HSPMLoss'](coarse_weight=args.hspm_coarse_loss_weight).cuda()
     if args.model in {"CMUNeXt_BA_DualGAG", "CMUNeXt_BA_DualGAG_SpeckleEnhance"}:
         return losses.__dict__['BoundaryAwareSegLoss'](lambda_b=args.boundary_loss_weight).cuda()
     return losses.__dict__['BCEDiceLoss']().cuda()

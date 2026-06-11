@@ -3,7 +3,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-__all__ = ['BCEDiceLoss', 'DiceBCELoss', 'SobelBoundaryLoss', 'BoundaryAwareSegLoss']
+__all__ = [
+    'BCEDiceLoss',
+    'DiceBCELoss',
+    'SobelBoundaryLoss',
+    'BoundaryAwareSegLoss',
+    'HSPMLoss',
+    'UBRDLoss',
+]
 
 
 class BCEDiceLoss(nn.Module):
@@ -98,6 +105,54 @@ class BoundaryAwareSegLoss(nn.Module):
         loss_seg = self.seg_loss(input, target)
         loss_bnd = self.boundary_loss(input, target)
         return loss_seg + self.lambda_b * loss_bnd
+
+
+class HSPMLoss(nn.Module):
+    def __init__(self, coarse_weight=0.3):
+        super().__init__()
+        if coarse_weight < 0:
+            raise ValueError("coarse_weight must be non-negative.")
+        self.coarse_weight = float(coarse_weight)
+        self.seg_loss = BCEDiceLoss()
+
+    def forward(self, outputs, target):
+        if not isinstance(outputs, dict):
+            raise TypeError("HSPMLoss expects model outputs to be a dictionary.")
+        if "seg" not in outputs or "coarse" not in outputs:
+            raise KeyError("HSPMLoss requires 'seg' and 'coarse' output keys.")
+
+        final_loss = self.seg_loss(outputs["seg"], target)
+        coarse_target = F.interpolate(target, size=outputs["coarse"].shape[-2:], mode="nearest")
+        coarse_loss = self.seg_loss(outputs["coarse"], coarse_target)
+        return final_loss + self.coarse_weight * coarse_loss
+
+
+class UBRDLoss(nn.Module):
+    def __init__(self, coarse_weight=0.3, boundary_weight=0.0):
+        super().__init__()
+        if coarse_weight < 0:
+            raise ValueError("coarse_weight must be non-negative.")
+        if boundary_weight < 0:
+            raise ValueError("boundary_weight must be non-negative.")
+        self.coarse_weight = float(coarse_weight)
+        self.boundary_weight = float(boundary_weight)
+        self.seg_loss = BCEDiceLoss()
+        self.boundary_loss = SobelBoundaryLoss()
+
+    def forward(self, outputs, target):
+        if not isinstance(outputs, dict):
+            raise TypeError("UBRDLoss expects model outputs to be a dictionary.")
+        if "seg" not in outputs or "coarse" not in outputs:
+            raise KeyError("UBRDLoss requires 'seg' and 'coarse' output keys.")
+
+        loss = self.seg_loss(outputs["seg"], target)
+        if self.coarse_weight > 0:
+            coarse_target = F.interpolate(target, size=outputs["coarse"].shape[-2:], mode="nearest")
+            coarse_loss = self.seg_loss(outputs["coarse"], coarse_target)
+            loss = loss + self.coarse_weight * coarse_loss
+        if self.boundary_weight > 0:
+            loss = loss + self.boundary_weight * self.boundary_loss(outputs["seg"], target)
+        return loss
 
 
 def compute_kl_loss(p, q):
