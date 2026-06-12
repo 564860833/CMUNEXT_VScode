@@ -115,16 +115,21 @@ class HSPMLoss(nn.Module):
         self.coarse_weight = float(coarse_weight)
         self.seg_loss = BCEDiceLoss()
 
-    def forward(self, outputs, target):
+    def forward(self, outputs, target, coarse_weight=None):
         if not isinstance(outputs, dict):
             raise TypeError("HSPMLoss expects model outputs to be a dictionary.")
         if "seg" not in outputs or "coarse" not in outputs:
             raise KeyError("HSPMLoss requires 'seg' and 'coarse' output keys.")
 
+        current_coarse_weight = self.coarse_weight if coarse_weight is None else float(coarse_weight)
+        if current_coarse_weight < 0:
+            raise ValueError("coarse_weight must be non-negative.")
         final_loss = self.seg_loss(outputs["seg"], target)
+        if current_coarse_weight == 0:
+            return final_loss
         coarse_target = F.interpolate(target, size=outputs["coarse"].shape[-2:], mode="nearest")
         coarse_loss = self.seg_loss(outputs["coarse"], coarse_target)
-        return final_loss + self.coarse_weight * coarse_loss
+        return final_loss + current_coarse_weight * coarse_loss
 
 
 class UBRDLoss(nn.Module):

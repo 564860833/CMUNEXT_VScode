@@ -29,6 +29,7 @@ results/
 
 # Local presentation/build helper scripts
 scripts/
+tools/
 
 # Model weights and experiment arrays
 *.pth

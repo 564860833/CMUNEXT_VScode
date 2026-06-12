@@ -1,5 +1,6 @@
 import os
 import argparse
+import json
 import random
 import numpy as np
 import torch
@@ -140,6 +141,26 @@ parser.add_argument('--hspm_mode', type=str, default="full", choices=["full", "c
                     help='Enable the full HSPM or keep only its high-resolution context bottleneck')
 parser.add_argument('--hspm_coarse_loss_weight', type=float, default=0.3,
                     help='Auxiliary coarse segmentation loss weight for CMUNeXt_HSPM')
+parser.add_argument('--hspm_mixer_mode', type=str, default="legacy", choices=["legacy", "bounded", "stable"],
+                    help='Prototype mixer behavior for CMUNeXt_HSPM; UBRD always keeps legacy behavior')
+parser.add_argument('--hspm_gamma_init', type=float, default=0.1,
+                    help='Initial prototype residual strength')
+parser.add_argument('--hspm_gamma_max', type=float, default=0.3,
+                    help='Maximum effective prototype residual strength in bounded/stable modes')
+parser.add_argument('--hspm_temperature', type=float, default=0.1,
+                    help='Prototype assignment temperature')
+parser.add_argument('--hspm_prototype_dropout', type=float, default=0.0,
+                    help='Dropout2d probability on stable prototype residuals')
+parser.add_argument('--hspm_prototype_warmup_epochs', type=int, default=0,
+                    help='Epochs used to linearly warm up stable prototype injection')
+parser.add_argument('--hspm_coarse_loss_final_weight', type=float, default=None,
+                    help='Final HSPM coarse loss weight; defaults to the initial weight')
+parser.add_argument('--hspm_coarse_loss_decay_epochs', type=int, default=0,
+                    help='Epochs used to linearly decay the HSPM coarse loss weight')
+parser.add_argument('--early_stop_patience', type=int, default=0,
+                    help='Stop after this many epochs without a significant validation IoU improvement; 0 disables')
+parser.add_argument('--early_stop_min_delta', type=float, default=0.001,
+                    help='Minimum validation IoU gain that resets early stopping patience')
 parser.add_argument('--ubrd_mode', type=str, default="full", choices=["add_only", "semantic_only", "full"],
                     help='UBRD ablation mode for CMUNeXt_HSPM_UBRD')
 parser.add_argument('--ubrd_boundary_loss_weight', type=float, default=0.0,
@@ -171,6 +192,11 @@ def get_model(args):
         model = cmunext_hspm(
             num_classes=args.num_classes,
             hspm_mode=args.hspm_mode,
+            hspm_mixer_mode=args.hspm_mixer_mode,
+            hspm_gamma_init=args.hspm_gamma_init,
+            hspm_gamma_max=args.hspm_gamma_max,
+            hspm_temperature=args.hspm_temperature,
+            hspm_prototype_dropout=args.hspm_prototype_dropout,
         ).cuda()
     elif args.model == "CMUNeXt_HSPM_UBRD":
         model = cmunext_hspm_ubrd(
@@ -285,7 +311,44 @@ def build_validation_thresholds(args):
 
 
 def compute_loss(args, criterion, outputs, label_batch, sampled_batch=None, aux_weight=None):
+    if args.model == "CMUNeXt_HSPM":
+        return criterion(outputs, label_batch, coarse_weight=aux_weight)
     return criterion(outputs, label_batch)
+
+
+def get_hspm_coarse_weight(args, epoch_num):
+    initial_weight = float(args.hspm_coarse_loss_weight)
+    final_weight = args.hspm_coarse_loss_final_weight
+    if final_weight is None:
+        final_weight = initial_weight
+    final_weight = float(final_weight)
+    decay_epochs = int(args.hspm_coarse_loss_decay_epochs)
+    if decay_epochs <= 0:
+        return initial_weight
+    progress = min(max(float(epoch_num) / decay_epochs, 0.0), 1.0)
+    return initial_weight + progress * (final_weight - initial_weight)
+
+
+def get_hspm_prototype_scale(args, epoch_num):
+    if args.model != "CMUNeXt_HSPM" or args.hspm_mixer_mode != "stable":
+        return 1.0
+    warmup_epochs = int(args.hspm_prototype_warmup_epochs)
+    if warmup_epochs <= 0:
+        return 1.0
+    return min(max(float(epoch_num) / warmup_epochs, 0.0), 1.0)
+
+
+def configure_hspm_epoch(args, model, epoch_num):
+    coarse_weight = get_hspm_coarse_weight(args, epoch_num)
+    prototype_scale = get_hspm_prototype_scale(args, epoch_num)
+    effective_gamma = None
+    if args.model == "CMUNeXt_HSPM":
+        hspm_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+        hspm_model.prototype_mixer.set_prototype_scale(prototype_scale)
+        effective_gamma = float(hspm_model.prototype_mixer.effective_gamma().detach().cpu())
+        if args.hspm_mixer_mode == "stable":
+            effective_gamma *= prototype_scale
+    return coarse_weight, prototype_scale, effective_gamma
 
 
 def getDataloader(args):
@@ -340,8 +403,20 @@ def getDataloader(args):
 
 
 def main(args):
+    if args.hspm_coarse_loss_weight < 0:
+        raise ValueError("hspm_coarse_loss_weight must be non-negative.")
+    if args.hspm_coarse_loss_final_weight is not None and args.hspm_coarse_loss_final_weight < 0:
+        raise ValueError("hspm_coarse_loss_final_weight must be non-negative.")
+    if args.hspm_coarse_loss_decay_epochs < 0 or args.hspm_prototype_warmup_epochs < 0:
+        raise ValueError("HSPM schedule epochs must be non-negative.")
+    if args.early_stop_patience < 0 or args.early_stop_min_delta < 0:
+        raise ValueError("Early stopping settings must be non-negative.")
+
     # <=== 新增 5: 确保保存目录存在 (使用 exist_ok=True 避免已存在时出错)
     os.makedirs(args.save_dir, exist_ok=True)
+    config_file_path = os.path.join(args.save_dir, 'training_config.json')
+    with open(config_file_path, 'w', encoding='utf-8') as config_file:
+        json.dump(vars(args), config_file, indent=2, ensure_ascii=True)
 
     # <=== 新增 6: 配置 logging
     log_file_path = os.path.join(args.save_dir, 'training_log.txt')
@@ -375,6 +450,8 @@ def main(args):
     # <=== 修改 7: 将 print 替换为 logging.info
     logging.info("{} iterations per epoch".format(len(trainloader)))
     best_iou = 0
+    early_stop_best_iou = float("-inf")
+    early_stop_wait = 0
     iter_num = 0
     max_epoch = args.epoch
 
@@ -389,6 +466,7 @@ def main(args):
     start_time = time.time()
 
     for epoch_num in range(max_epoch):
+        current_coarse_weight, prototype_scale, effective_gamma = configure_hspm_epoch(args, model, epoch_num)
         model.train()
         avg_meters = {'loss': AverageMeter(),
                       'iou': AverageMeter(),
@@ -413,7 +491,14 @@ def main(args):
             seg_logits = get_seg_logits(outputs)
 
             loss = get_loss_tensor(
-                compute_loss(args, criterion, outputs, label_batch, sampled_batch)
+                compute_loss(
+                    args,
+                    criterion,
+                    outputs,
+                    label_batch,
+                    sampled_batch,
+                    aux_weight=current_coarse_weight,
+                )
             )
             iou, dice, _, _, _, _, _ = iou_score(seg_logits, label_batch)
             optimizer.zero_grad()
@@ -444,7 +529,14 @@ def main(args):
                 output = forward_with_model(args, model, img_batch)
                 seg_logits = get_seg_logits(output)
                 loss = get_loss_tensor(
-                    compute_loss(args, criterion, output, label_batch, sampled_batch)
+                    compute_loss(
+                        args,
+                        criterion,
+                        output,
+                        label_batch,
+                        sampled_batch,
+                        aux_weight=current_coarse_weight,
+                    )
                 )
                 avg_meters['val_loss'].update(loss.item(), img_batch.size(0))
                 if args.val_threshold_mode == "scan":
@@ -495,6 +587,13 @@ def main(args):
         # <=== 修改 8: 将 print 替换为 logging.info
         elapsed_time = time.time() - start_time
         elapsed_str = time.strftime('%H:%M:%S', time.gmtime(elapsed_time))
+        if args.model == "CMUNeXt_HSPM":
+            logging.info(
+                "HSPM schedule: coarse_weight=%.4f - prototype_scale=%.4f - effective_gamma=%.4f",
+                current_coarse_weight,
+                prototype_scale,
+                effective_gamma,
+            )
         if args.val_threshold_mode == "scan":
             logging.info(
                 'epoch [%d/%d] (Total time: %s)  train_loss : %.4f, train_iou: %.4f - val_loss %.4f - val_thr %.4f - '
@@ -539,6 +638,23 @@ def main(args):
             else:
                 logging.info(f"=> saved best model to {save_file_path}")
 
+        if args.early_stop_patience > 0:
+            current_iou = avg_meters['val_iou'].avg
+            if current_iou > early_stop_best_iou + args.early_stop_min_delta:
+                early_stop_best_iou = current_iou
+                early_stop_wait = 0
+            else:
+                early_stop_wait += 1
+                logging.info(
+                    "Early stopping wait: %d/%d (best significant val_iou=%.4f)",
+                    early_stop_wait,
+                    args.early_stop_patience,
+                    early_stop_best_iou,
+                )
+                if early_stop_wait >= args.early_stop_patience:
+                    logging.info("=> Early stopping triggered at epoch %d", epoch_num)
+                    break
+
     # <=== 修改 11: 将 print 替换为 logging.info，并使用 args.save_dir
     # 目录已在 main 开头创建，这里无需检查
     logging.info("Saving metric history...")
@@ -551,7 +667,7 @@ def main(args):
 
     # <=== 新增 7: 绘制并保存训练曲线图
     logging.info("Saving training curve plots...")
-    epochs = range(1, max_epoch + 1)
+    epochs = range(1, len(train_loss_history) + 1)
 
     # 绘制 Loss 曲线
     plt.figure()

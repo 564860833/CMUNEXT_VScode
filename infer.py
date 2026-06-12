@@ -87,6 +87,11 @@ def build_model(args, parser):
         model = cmunext_hspm(
             num_classes=args.num_classes,
             hspm_mode=args.hspm_mode,
+            hspm_mixer_mode=args.hspm_mixer_mode,
+            hspm_gamma_init=args.hspm_gamma_init,
+            hspm_gamma_max=args.hspm_gamma_max,
+            hspm_temperature=args.hspm_temperature,
+            hspm_prototype_dropout=args.hspm_prototype_dropout,
         )
     elif args.model == "CMUNeXt_HSPM_UBRD":
         model = cmunext_hspm_ubrd(
@@ -525,6 +530,27 @@ if __name__ == "__main__":
                         help="Enable the full HSPM or keep only its high-resolution context bottleneck")
     parser.add_argument("--hspm_coarse_loss_weight", type=float, default=0.3,
                         help="Auxiliary coarse segmentation loss weight for CMUNeXt_HSPM")
+    parser.add_argument("--hspm_mixer_mode", type=str, default="legacy",
+                        choices=["legacy", "bounded", "stable"],
+                        help="Prototype mixer behavior for CMUNeXt_HSPM; UBRD always keeps legacy behavior")
+    parser.add_argument("--hspm_gamma_init", type=float, default=0.1,
+                        help="Initial prototype residual strength")
+    parser.add_argument("--hspm_gamma_max", type=float, default=0.3,
+                        help="Maximum effective prototype residual strength in bounded/stable modes")
+    parser.add_argument("--hspm_temperature", type=float, default=0.1,
+                        help="Prototype assignment temperature")
+    parser.add_argument("--hspm_prototype_dropout", type=float, default=0.0,
+                        help="Dropout2d probability on stable prototype residuals")
+    parser.add_argument("--hspm_prototype_warmup_epochs", type=int, default=0,
+                        help="Training-only compatibility option; inference always uses full prototype injection")
+    parser.add_argument("--hspm_coarse_loss_final_weight", type=float, default=None,
+                        help="Training-only compatibility option")
+    parser.add_argument("--hspm_coarse_loss_decay_epochs", type=int, default=0,
+                        help="Training-only compatibility option")
+    parser.add_argument("--early_stop_patience", type=int, default=0,
+                        help="Training-only compatibility option")
+    parser.add_argument("--early_stop_min_delta", type=float, default=0.001,
+                        help="Training-only compatibility option")
     parser.add_argument("--ubrd_mode", type=str, default="full", choices=["add_only", "semantic_only", "full"],
                         help="UBRD ablation mode for CMUNeXt_HSPM_UBRD")
     parser.add_argument("--ubrd_boundary_loss_weight", type=float, default=0.0,
