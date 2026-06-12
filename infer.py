@@ -92,6 +92,9 @@ def build_model(args, parser):
             hspm_gamma_max=args.hspm_gamma_max,
             hspm_temperature=args.hspm_temperature,
             hspm_prototype_dropout=args.hspm_prototype_dropout,
+            hspm_backbone_mode=args.hspm_backbone_mode,
+            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
+            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
         )
     elif args.model == "CMUNeXt_HSPM_UBRD":
         model = cmunext_hspm_ubrd(
@@ -159,6 +162,10 @@ def load_model(model_path, args, device, parser):
     model = build_model(args, parser)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
+    if args.model == "CMUNeXt_HSPM":
+        effective_fusion_gate = model.effective_fusion_gate()
+        if effective_fusion_gate is not None:
+            print(f"HSPM effective fusion gate: {effective_fusion_gate.detach().cpu().item():.4f}")
     if torch.cuda.device_count() > 1:
         print("Let's use", torch.cuda.device_count(), "GPUs!")
         model = torch.nn.DataParallel(model)
@@ -541,6 +548,13 @@ if __name__ == "__main__":
                         help="Prototype assignment temperature")
     parser.add_argument("--hspm_prototype_dropout", type=float, default=0.0,
                         help="Dropout2d probability on stable prototype residuals")
+    parser.add_argument("--hspm_backbone_mode", type=str, default="highres_only",
+                        choices=["highres_only", "dual_path"],
+                        help="Use the legacy high-resolution-only bottleneck or the dual-path CMUNeXt bottleneck")
+    parser.add_argument("--hspm_fusion_gate_init", type=float, default=0.05,
+                        help="Initial effective HSPM residual gate in dual-path mode")
+    parser.add_argument("--hspm_fusion_gate_max", type=float, default=0.3,
+                        help="Maximum effective HSPM residual gate in dual-path mode")
     parser.add_argument("--hspm_prototype_warmup_epochs", type=int, default=0,
                         help="Training-only compatibility option; inference always uses full prototype injection")
     parser.add_argument("--hspm_coarse_loss_final_weight", type=float, default=None,

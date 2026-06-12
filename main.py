@@ -151,6 +151,13 @@ parser.add_argument('--hspm_temperature', type=float, default=0.1,
                     help='Prototype assignment temperature')
 parser.add_argument('--hspm_prototype_dropout', type=float, default=0.0,
                     help='Dropout2d probability on stable prototype residuals')
+parser.add_argument('--hspm_backbone_mode', type=str, default="highres_only",
+                    choices=["highres_only", "dual_path"],
+                    help='Use the legacy high-resolution-only bottleneck or the dual-path CMUNeXt bottleneck')
+parser.add_argument('--hspm_fusion_gate_init', type=float, default=0.05,
+                    help='Initial effective HSPM residual gate in dual-path mode')
+parser.add_argument('--hspm_fusion_gate_max', type=float, default=0.3,
+                    help='Maximum effective HSPM residual gate in dual-path mode')
 parser.add_argument('--hspm_prototype_warmup_epochs', type=int, default=0,
                     help='Epochs used to linearly warm up stable prototype injection')
 parser.add_argument('--hspm_coarse_loss_final_weight', type=float, default=None,
@@ -197,6 +204,9 @@ def get_model(args):
             hspm_gamma_max=args.hspm_gamma_max,
             hspm_temperature=args.hspm_temperature,
             hspm_prototype_dropout=args.hspm_prototype_dropout,
+            hspm_backbone_mode=args.hspm_backbone_mode,
+            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
+            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
         ).cuda()
     elif args.model == "CMUNeXt_HSPM_UBRD":
         model = cmunext_hspm_ubrd(
@@ -588,11 +598,19 @@ def main(args):
         elapsed_time = time.time() - start_time
         elapsed_str = time.strftime('%H:%M:%S', time.gmtime(elapsed_time))
         if args.model == "CMUNeXt_HSPM":
+            hspm_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+            effective_gamma = float(hspm_model.prototype_mixer.effective_gamma().detach().cpu())
+            if args.hspm_mixer_mode == "stable":
+                effective_gamma *= prototype_scale
+            fusion_gate = hspm_model.effective_fusion_gate()
+            effective_fusion_gate = None if fusion_gate is None else float(fusion_gate.detach().cpu())
             logging.info(
-                "HSPM schedule: coarse_weight=%.4f - prototype_scale=%.4f - effective_gamma=%.4f",
+                "HSPM schedule: coarse_weight=%.4f - prototype_scale=%.4f - effective_gamma=%.4f"
+                " - effective_fusion_gate=%s",
                 current_coarse_weight,
                 prototype_scale,
                 effective_gamma,
+                "n/a" if effective_fusion_gate is None else f"{effective_fusion_gate:.4f}",
             )
         if args.val_threshold_mode == "scan":
             logging.info(

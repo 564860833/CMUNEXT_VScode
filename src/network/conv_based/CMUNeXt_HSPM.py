@@ -162,14 +162,23 @@ class CMUNeXt_HSPM(nn.Module):
         hspm_gamma_max=0.3,
         hspm_temperature=0.1,
         hspm_prototype_dropout=0.0,
+        hspm_backbone_mode="highres_only",
+        hspm_fusion_gate_init=0.05,
+        hspm_fusion_gate_max=0.3,
     ):
         super().__init__()
         if num_classes != 1:
             raise ValueError("CMUNeXt_HSPM supports binary segmentation only; num_classes must be 1.")
         if hspm_mode not in {"full", "context_only"}:
             raise ValueError("hspm_mode must be either 'full' or 'context_only'.")
+        if hspm_backbone_mode not in {"highres_only", "dual_path"}:
+            raise ValueError("hspm_backbone_mode must be either 'highres_only' or 'dual_path'.")
+        if not 0.0 < hspm_fusion_gate_init < hspm_fusion_gate_max:
+            raise ValueError("hspm_fusion_gate_init must be in (0, hspm_fusion_gate_max).")
 
         self.hspm_mode = hspm_mode
+        self.hspm_backbone_mode = hspm_backbone_mode
+        self.hspm_fusion_gate_max = float(hspm_fusion_gate_max)
         self.Maxpool = nn.MaxPool2d(kernel_size=2, stride=2)
 
         self.stem = conv_block(ch_in=input_channel, ch_out=dims[0])
@@ -188,7 +197,28 @@ class CMUNeXt_HSPM(nn.Module):
             mixer_mode=hspm_mixer_mode,
         )
 
-        self.Up4 = up_conv(ch_in=dims[4], ch_out=dims[2])
+        if self.hspm_backbone_mode == "dual_path":
+            self.encoder5 = CMUNeXtBlock(
+                ch_in=dims[3],
+                ch_out=dims[4],
+                depth=depths[4],
+                k=kernels[4],
+            )
+            self.Up5 = up_conv(ch_in=dims[4], ch_out=dims[3])
+            self.Up_conv5 = fusion_conv(ch_in=dims[3] * 2, ch_out=dims[3])
+            self.hspm_projection = nn.Sequential(
+                nn.Conv2d(dims[4], dims[3], kernel_size=1, bias=False),
+                nn.BatchNorm2d(dims[3]),
+            )
+            gate_ratio = float(hspm_fusion_gate_init) / self.hspm_fusion_gate_max
+            self.fusion_gate_raw = nn.Parameter(
+                torch.tensor(_inverse_sigmoid(gate_ratio), dtype=torch.float32)
+            )
+            up4_input_channels = dims[3]
+        else:
+            up4_input_channels = dims[4]
+
+        self.Up4 = up_conv(ch_in=up4_input_channels, ch_out=dims[2])
         self.Up_conv4 = fusion_conv(ch_in=dims[2] * 2, ch_out=dims[2])
         self.Up3 = up_conv(ch_in=dims[2], ch_out=dims[1])
         self.Up_conv3 = fusion_conv(ch_in=dims[1] * 2, ch_out=dims[1])
@@ -196,19 +226,33 @@ class CMUNeXt_HSPM(nn.Module):
         self.Up_conv2 = fusion_conv(ch_in=dims[0] * 2, ch_out=dims[0])
         self.Conv_1x1 = nn.Conv2d(dims[0], num_classes, kernel_size=1, stride=1, padding=0)
 
+    def effective_fusion_gate(self):
+        if self.hspm_backbone_mode != "dual_path":
+            return None
+        return self.hspm_fusion_gate_max * torch.sigmoid(self.fusion_gate_raw)
+
     def forward(self, x):
         x1 = self.encoder1(self.stem(x))
         x2 = self.encoder2(self.Maxpool(x1))
         x3 = self.encoder3(self.Maxpool(x2))
         x4 = self.encoder4(self.Maxpool(x3))
 
-        bottleneck = self.high_resolution_context(x4)
-        bottleneck, coarse_logits, uncertainty = self.prototype_mixer(
-            bottleneck,
+        hspm_feature = self.high_resolution_context(x4)
+        hspm_feature, coarse_logits, uncertainty = self.prototype_mixer(
+            hspm_feature,
             use_prototype=self.hspm_mode == "full",
         )
 
-        d4 = self.Up4(bottleneck)
+        if self.hspm_backbone_mode == "dual_path":
+            x5 = self.encoder5(self.Maxpool(x4))
+            deep_feature = self.Up5(x5)
+            deep_feature = self.Up_conv5(torch.cat((x4, deep_feature), dim=1))
+            hspm_residual = self.hspm_projection(hspm_feature)
+            decoder_input = deep_feature + self.effective_fusion_gate() * hspm_residual
+        else:
+            decoder_input = hspm_feature
+
+        d4 = self.Up4(decoder_input)
         d4 = self.Up_conv4(torch.cat((x3, d4), dim=1))
 
         d3 = self.Up3(d4)
@@ -236,6 +280,9 @@ def cmunext_hspm(
     hspm_gamma_max=0.3,
     hspm_temperature=0.1,
     hspm_prototype_dropout=0.0,
+    hspm_backbone_mode="highres_only",
+    hspm_fusion_gate_init=0.05,
+    hspm_fusion_gate_max=0.3,
 ):
     return CMUNeXt_HSPM(
         input_channel=input_channel,
@@ -249,4 +296,7 @@ def cmunext_hspm(
         hspm_gamma_max=hspm_gamma_max,
         hspm_temperature=hspm_temperature,
         hspm_prototype_dropout=hspm_prototype_dropout,
+        hspm_backbone_mode=hspm_backbone_mode,
+        hspm_fusion_gate_init=hspm_fusion_gate_init,
+        hspm_fusion_gate_max=hspm_fusion_gate_max,
     )

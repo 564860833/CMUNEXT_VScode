@@ -17,7 +17,7 @@ from src.utils.losses import HSPMLoss
 
 
 class HSPMStabilityTests(unittest.TestCase):
-    def _small_model(self, mixer_mode):
+    def _small_model(self, mixer_mode, backbone_mode="highres_only"):
         return cmunext_hspm(
             dims=(4, 8, 16, 20, 24),
             depths=(1, 1, 1, 1, 1),
@@ -27,6 +27,9 @@ class HSPMStabilityTests(unittest.TestCase):
             hspm_gamma_max=0.3,
             hspm_temperature=0.5 if mixer_mode == "stable" else 0.1,
             hspm_prototype_dropout=0.1 if mixer_mode == "stable" else 0.0,
+            hspm_backbone_mode=backbone_mode,
+            hspm_fusion_gate_init=0.05,
+            hspm_fusion_gate_max=0.3,
         )
 
     def test_modes_keep_output_contract(self):
@@ -38,6 +41,57 @@ class HSPMStabilityTests(unittest.TestCase):
             self.assertEqual(set(outputs), {"seg", "coarse", "uncertainty"})
             self.assertEqual(outputs["seg"].shape, (2, 1, 32, 32))
             self.assertEqual(outputs["coarse"].shape, (2, 1, 4, 4))
+
+    def test_dual_path_keeps_output_contract(self):
+        model = self._small_model("legacy", backbone_mode="dual_path").eval()
+        with torch.no_grad():
+            outputs = model(torch.randn(2, 3, 32, 32))
+        self.assertEqual(set(outputs), {"seg", "coarse", "uncertainty"})
+        self.assertEqual(outputs["seg"].shape, (2, 1, 32, 32))
+        self.assertEqual(outputs["coarse"].shape, (2, 1, 4, 4))
+
+    def test_dual_path_fusion_gate_initialization_and_bounds(self):
+        model = self._small_model("legacy", backbone_mode="dual_path")
+        self.assertAlmostEqual(model.effective_fusion_gate().item(), 0.05, places=5)
+        for raw_gate in (-100.0, 0.0, 100.0):
+            model.fusion_gate_raw.data.fill_(raw_gate)
+            effective_gate = model.effective_fusion_gate().item()
+            self.assertGreaterEqual(effective_gate, 0.0)
+            self.assertLessEqual(effective_gate, 0.300001)
+
+    def test_dual_path_rejects_invalid_fusion_gate_configuration(self):
+        for gate_init, gate_max in ((0.0, 0.3), (0.3, 0.3), (0.4, 0.3)):
+            with self.assertRaises(ValueError):
+                cmunext_hspm(
+                    dims=(4, 8, 16, 20, 24),
+                    depths=(1, 1, 1, 1, 1),
+                    kernels=(3, 3, 3, 3, 3),
+                    hspm_backbone_mode="dual_path",
+                    hspm_fusion_gate_init=gate_init,
+                    hspm_fusion_gate_max=gate_max,
+                )
+
+    def test_dual_path_final_loss_updates_both_paths_projection_and_gate(self):
+        model = self._small_model("legacy", backbone_mode="dual_path").train()
+        outputs = model(torch.randn(2, 3, 32, 32))
+        loss = HSPMLoss(coarse_weight=0.3)(
+            outputs,
+            torch.randint(0, 2, (2, 1, 32, 32)).float(),
+        )
+        loss.backward()
+
+        self.assertIsNotNone(model.encoder5.up.conv[0].weight.grad)
+        self.assertIsNotNone(model.high_resolution_context.input_proj[0].weight.grad)
+        self.assertIsNotNone(model.hspm_projection[0].weight.grad)
+        self.assertIsNotNone(model.fusion_gate_raw.grad)
+
+    def test_dual_path_projection_is_signed_and_parameter_budget_is_bounded(self):
+        model = cmunext_hspm(hspm_backbone_mode="dual_path").eval()
+        with torch.no_grad():
+            projected = model.hspm_projection(torch.randn(2, 256, 8, 8))
+        self.assertLess(projected.min().item(), 0.0)
+        self.assertGreater(projected.max().item(), 0.0)
+        self.assertLessEqual(sum(parameter.numel() for parameter in model.parameters()), 3_500_000)
 
     def test_bounded_gamma_stays_in_range(self):
         mixer = ConfidenceAwarePrototypeMixer(
@@ -119,6 +173,13 @@ class HSPMStabilityTests(unittest.TestCase):
         legacy = self._small_model("legacy")
         stable = self._small_model("stable")
         stable.load_state_dict(legacy.state_dict(), strict=True)
+
+    def test_highres_only_state_dict_contract_excludes_dual_path_modules(self):
+        legacy = self._small_model("legacy")
+        rebuilt = self._small_model("legacy")
+        rebuilt.load_state_dict(legacy.state_dict(), strict=True)
+        self.assertFalse(any(key.startswith("encoder5.") for key in legacy.state_dict()))
+        self.assertNotIn("fusion_gate_raw", legacy.state_dict())
 
     def test_ubrd_legacy_state_dict_contract_is_unchanged(self):
         legacy_ubrd = cmunext_hspm_ubrd(
