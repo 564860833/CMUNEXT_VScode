@@ -16,7 +16,7 @@ from src.dataloader.dataset import MedicalDataSets
 from albumentations.augmentations import transforms
 from albumentations.core.composition import Compose
 from albumentations import RandomRotate90, Resize, RandomBrightnessContrast, \
-    GaussNoise, OneOf, RandomGamma, GaussianBlur, GridDistortion
+    GaussNoise, OneOf, RandomGamma, GaussianBlur, GridDistortion, MultiplicativeNoise
 
 import src.utils.losses as losses
 from src.utils.util import AverageMeter
@@ -123,6 +123,9 @@ parser.add_argument('--seed', type=int, default=41, help='random seed')
 parser.add_argument('--save_dir', type=str, default="./checkpoint", help='directory to save the best model')
 # <=== 新增：是否开启额外数据增强的指令
 parser.add_argument('--use_extra_aug', action='store_true', help='Whether to use conservative extra data augmentations')
+parser.add_argument('--extra_aug_profile', type=str, default='legacy',
+                    choices=['legacy', 'hspm_safe'],
+                    help='Extra augmentation profile; hspm_safe requires --use_extra_aug')
 parser.add_argument('--ddsr_stages', type=parse_ddsr_stages, default=(0, 1),
                     help='Comma-separated DDSR stages for CMUNeXt_SpeckleEnhance, e.g. 0,1 or 2,3 or 0,1,2,3')
 parser.add_argument('--ddsr_smooth_k', type=int, default=5,
@@ -381,38 +384,68 @@ def get_hspm_fusion_diagnostics(model):
     }
 
 
+def validate_augmentation_args(args):
+    profile = getattr(args, "extra_aug_profile", "legacy")
+    if profile not in {"legacy", "hspm_safe"}:
+        raise ValueError("extra_aug_profile must be one of: legacy, hspm_safe.")
+    if profile == "hspm_safe" and not args.use_extra_aug:
+        raise ValueError("--extra_aug_profile hspm_safe requires --use_extra_aug.")
+
+
+def build_train_transform(args, img_size):
+    validate_augmentation_args(args)
+    profile = getattr(args, "extra_aug_profile", "legacy")
+
+    if not args.use_extra_aug:
+        logging.info("=> Using BASIC data augmentation.")
+        return Compose([
+            RandomRotate90(p=0.5),
+            transforms.Flip(p=0.5),
+            Resize(img_size, img_size),
+            transforms.Normalize(),
+        ])
+
+    logging.info("=> Enabled EXTRA data augmentation profile: %s.", profile)
+    if profile == "hspm_safe":
+        return Compose([
+            RandomRotate90(p=0.5),
+            transforms.Flip(p=0.5),
+            OneOf([
+                RandomBrightnessContrast(brightness_limit=0.10, contrast_limit=0.10, p=1.0),
+                RandomGamma(gamma_limit=(90, 110), p=1.0),
+                MultiplicativeNoise(
+                    multiplier=(0.95, 1.05),
+                    per_channel=False,
+                    elementwise=True,
+                    p=1.0,
+                ),
+            ], p=0.30),
+            GaussianBlur(blur_limit=(3, 3), p=0.05),
+            Resize(img_size, img_size),
+            transforms.Normalize(),
+        ])
+
+    return Compose([
+        RandomRotate90(p=0.5),
+        transforms.Flip(p=0.5),
+        GridDistortion(num_steps=5, distort_limit=0.05, p=0.15),
+        OneOf([
+            RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=1.0),
+            RandomGamma(gamma_limit=(85, 115), p=1.0),
+            GaussNoise(var_limit=(10.0, 40.0), p=1.0),
+        ], p=0.3),
+        GaussianBlur(blur_limit=(3, 5), p=0.15),
+        Resize(img_size, img_size),
+        transforms.Normalize(),
+    ])
+
+
 def getDataloader(args):
     img_size = args.img_size
     if args.model == "SwinUnet":
         img_size = 224
 
-    # <=== 修改：根据参数选择增强策略
-    if args.use_extra_aug:
-        logging.info("=> Enabled conservative EXTRA data augmentation.")
-        train_transform = Compose([
-            RandomRotate90(p=0.5),
-            transforms.Flip(p=0.5),
-            # 保守版额外增强：低强度非刚性形变，增加形状鲁棒性但避免过度拉扯病灶轮廓
-            GridDistortion(num_steps=5, distort_limit=0.05, p=0.15),
-            OneOf([
-                RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=1.0),
-                RandomGamma(gamma_limit=(85, 115), p=1.0),
-                GaussNoise(var_limit=(10.0, 40.0), p=1.0),
-            ], p=0.3),
-            # 保守版额外增强：轻模糊，模拟超声成像中的轻微软化
-            GaussianBlur(blur_limit=(3, 5), p=0.15),
-            Resize(img_size, img_size),
-            transforms.Normalize(),
-        ])
-    else:
-        logging.info("=> Using BASIC data augmentation.")
-        train_transform = Compose([
-            RandomRotate90(p=0.5),
-            transforms.Flip(p=0.5),
-            Resize(img_size, img_size),
-            transforms.Normalize(),
-        ])
-    # =================================
+    train_transform = build_train_transform(args, img_size)
 
     val_transform = Compose([
         Resize(img_size, img_size),
@@ -433,6 +466,7 @@ def getDataloader(args):
 
 
 def main(args):
+    validate_augmentation_args(args)
     if args.hspm_coarse_loss_weight < 0:
         raise ValueError("hspm_coarse_loss_weight must be non-negative.")
     if args.hspm_coarse_loss_final_weight is not None and args.hspm_coarse_loss_final_weight < 0:

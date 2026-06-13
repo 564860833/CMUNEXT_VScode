@@ -84,6 +84,22 @@ Then, training and validating your dataset:
 python main.py --model [MobileUViT/CMUNeXt/CMUNet/MK_UNet/TransUnet/...] --base_dir ./data/busi --train_file_dir busi_train.txt --val_file_dir busi_val.txt --base_lr 0.01 --epoch 300 --batch_size 8
 ```
 
+### Extra augmentation profiles
+
+`--use_extra_aug` keeps the existing `legacy` augmentation profile by default. For HSPM experiments, `hspm_safe` protects lesion geometry by using only mild image-style perturbations and requires `--use_extra_aug`:
+
+```bash
+python main.py --model CMUNeXt_HSPM \
+  --base_dir ./data/busi --train_file_dir busi_train3.txt --val_file_dir busi_val3.txt \
+  --save_dir ./checkpoint/6.13/busi-CMUNeXt_HSPM-dual-global-coarse01-hspm-safe-3-a \
+  --base_lr 0.01 --epoch 300 --batch_size 8 \
+  --hspm_backbone_mode dual_path \
+  --hspm_fusion_mode global \
+  --hspm_mixer_mode legacy \
+  --hspm_coarse_loss_weight 0.1 \
+  --use_extra_aug --extra_aug_profile hspm_safe
+```
+
 ## Inference
 
 ```python
