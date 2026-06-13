@@ -100,6 +100,22 @@ python main.py --model CMUNeXt_HSPM \
   --use_extra_aug --extra_aug_profile hspm_safe
 ```
 
+For the first APBR structure-validation run, keep the strongest HSPM settings fixed,
+warm up APBR routing, and disable boundary loss and coarse-loss decay:
+
+```bash
+python main.py --model CMUNeXt_HSPM_APBR \
+  --base_dir ./data/busi --train_file_dir busi_train3.txt --val_file_dir busi_val3.txt \
+  --save_dir ./checkpoint/6.13/busi-CMUNeXt_HSPM_APBR-full-3-a \
+  --base_lr 0.01 --epoch 300 --batch_size 8 \
+  --hspm_fusion_mode global --hspm_mixer_mode legacy \
+  --apbr_mode full --apbr_route_warmup_epochs 30 \
+  --apbr_coarse_loss_weight 0.1 --apbr_coarse_loss_final_weight 0.1 \
+  --apbr_coarse_loss_decay_epochs 0 --apbr_intermediate_loss_weight 0.15 \
+  --apbr_boundary_loss_weight 0 --early_stop_patience 40 \
+  --use_extra_aug --extra_aug_profile hspm_safe
+```
+
 ## Inference
 
 ```python

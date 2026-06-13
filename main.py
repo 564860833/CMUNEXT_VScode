@@ -30,6 +30,7 @@ from src.network.conv_based.UNetplus import ResNet34UnetPlus
 from src.network.conv_based.UNet3plus import UNet3plus
 from src.network.conv_based.CMUNeXt import cmunext
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
+from src.network.conv_based.CMUNeXt_HSPM_APBR import cmunext_hspm_apbr
 from src.network.conv_based.CMUNeXt_HSPM_UBRD import cmunext_hspm_ubrd
 from src.network.conv_based.CMUNeXt_BA_DualGAG import cmunext_ba_dualgag
 from src.network.conv_based.CMUNeXt_BA_DualGAG_SpeckleEnhance import cmunext_ba_dualgag_speckleenhance
@@ -105,7 +106,7 @@ def parse_gag_stages(value):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default="CMUNeXt",
-                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_HSPM", "CMUNeXt_HSPM_UBRD",
+                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR", "CMUNeXt_HSPM_UBRD",
                              "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
                              "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
                              "CMUNeXt_BA_DualGAG_SpeckleEnhance",
@@ -181,6 +182,21 @@ parser.add_argument('--ubrd_mode', type=str, default="full", choices=["add_only"
                     help='UBRD ablation mode for CMUNeXt_HSPM_UBRD')
 parser.add_argument('--ubrd_boundary_loss_weight', type=float, default=0.0,
                     help='Optional final-prediction boundary loss weight for CMUNeXt_HSPM_UBRD')
+parser.add_argument('--apbr_mode', type=str, default="full",
+                    choices=["full", "no_ambiguity", "no_detail"],
+                    help='APBR ablation mode for CMUNeXt_HSPM_APBR')
+parser.add_argument('--apbr_route_warmup_epochs', type=int, default=30,
+                    help='Epochs used to linearly warm up APBR ambiguity routing')
+parser.add_argument('--apbr_coarse_loss_weight', type=float, default=0.1,
+                    help='Initial APBR coarse segmentation loss weight')
+parser.add_argument('--apbr_coarse_loss_final_weight', type=float, default=0.02,
+                    help='Final APBR coarse segmentation loss weight')
+parser.add_argument('--apbr_coarse_loss_decay_epochs', type=int, default=150,
+                    help='Epochs used to linearly decay the APBR coarse loss weight')
+parser.add_argument('--apbr_intermediate_loss_weight', type=float, default=0.15,
+                    help='Half-resolution APBR supervision weight')
+parser.add_argument('--apbr_boundary_loss_weight', type=float, default=0.1,
+                    help='Final-prediction APBR boundary loss weight')
 parser.add_argument('--val_threshold_mode', type=str, default="fixed", choices=["fixed", "scan"],
                     help='Use a fixed validation threshold or scan a threshold range')
 parser.add_argument('--val_threshold', type=float, default=0.5,
@@ -219,6 +235,22 @@ def get_model(args):
             hspm_fusion_mode=args.hspm_fusion_mode,
             hspm_small_area_threshold=args.hspm_small_area_threshold,
             hspm_small_area_temperature=args.hspm_small_area_temperature,
+        ).cuda()
+    elif args.model == "CMUNeXt_HSPM_APBR":
+        model = cmunext_hspm_apbr(
+            num_classes=args.num_classes,
+            hspm_mode=args.hspm_mode,
+            hspm_mixer_mode=args.hspm_mixer_mode,
+            hspm_gamma_init=args.hspm_gamma_init,
+            hspm_gamma_max=args.hspm_gamma_max,
+            hspm_temperature=args.hspm_temperature,
+            hspm_prototype_dropout=args.hspm_prototype_dropout,
+            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
+            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
+            hspm_fusion_mode=args.hspm_fusion_mode,
+            hspm_small_area_threshold=args.hspm_small_area_threshold,
+            hspm_small_area_temperature=args.hspm_small_area_temperature,
+            apbr_mode=args.apbr_mode,
         ).cuda()
     elif args.model == "CMUNeXt_HSPM_UBRD":
         model = cmunext_hspm_ubrd(
@@ -277,6 +309,12 @@ def get_model(args):
 
 
 def get_criterion(args):
+    if args.model == "CMUNeXt_HSPM_APBR":
+        return losses.__dict__['APBRLoss'](
+            coarse_weight=args.apbr_coarse_loss_weight,
+            intermediate_weight=args.apbr_intermediate_loss_weight,
+            boundary_weight=args.apbr_boundary_loss_weight,
+        ).cuda()
     if args.model == "CMUNeXt_HSPM_UBRD":
         return losses.__dict__['UBRDLoss'](
             coarse_weight=args.hspm_coarse_loss_weight,
@@ -311,6 +349,12 @@ def get_loss_tensor(loss_output):
     return loss_output
 
 
+def get_loss_components(loss_output):
+    if not isinstance(loss_output, tuple) or len(loss_output) < 2:
+        return None
+    return loss_output[1]
+
+
 def build_validation_thresholds(args):
     if args.val_threshold_mode == "fixed":
         thresholds = [args.val_threshold]
@@ -333,6 +377,13 @@ def build_validation_thresholds(args):
 
 
 def compute_loss(args, criterion, outputs, label_batch, sampled_batch=None, aux_weight=None):
+    if args.model == "CMUNeXt_HSPM_APBR":
+        return criterion(
+            outputs,
+            label_batch,
+            coarse_weight=aux_weight,
+            return_components=True,
+        )
     if args.model == "CMUNeXt_HSPM":
         return criterion(outputs, label_batch, coarse_weight=aux_weight)
     return criterion(outputs, label_batch)
@@ -351,8 +402,25 @@ def get_hspm_coarse_weight(args, epoch_num):
     return initial_weight + progress * (final_weight - initial_weight)
 
 
+def get_apbr_coarse_weight(args, epoch_num):
+    initial_weight = float(args.apbr_coarse_loss_weight)
+    final_weight = float(args.apbr_coarse_loss_final_weight)
+    decay_epochs = int(args.apbr_coarse_loss_decay_epochs)
+    if decay_epochs <= 0:
+        return initial_weight
+    progress = min(max(float(epoch_num) / decay_epochs, 0.0), 1.0)
+    return initial_weight + progress * (final_weight - initial_weight)
+
+
+def get_apbr_route_scale(args, epoch_num):
+    warmup_epochs = int(getattr(args, "apbr_route_warmup_epochs", 30))
+    if warmup_epochs <= 0:
+        return 1.0
+    return min(max(float(epoch_num + 1) / warmup_epochs, 0.0), 1.0)
+
+
 def get_hspm_prototype_scale(args, epoch_num):
-    if args.model != "CMUNeXt_HSPM" or args.hspm_mixer_mode != "stable":
+    if args.model not in {"CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR"} or args.hspm_mixer_mode != "stable":
         return 1.0
     warmup_epochs = int(args.hspm_prototype_warmup_epochs)
     if warmup_epochs <= 0:
@@ -361,12 +429,17 @@ def get_hspm_prototype_scale(args, epoch_num):
 
 
 def configure_hspm_epoch(args, model, epoch_num):
-    coarse_weight = get_hspm_coarse_weight(args, epoch_num)
+    if args.model == "CMUNeXt_HSPM_APBR":
+        coarse_weight = get_apbr_coarse_weight(args, epoch_num)
+    else:
+        coarse_weight = get_hspm_coarse_weight(args, epoch_num)
     prototype_scale = get_hspm_prototype_scale(args, epoch_num)
     effective_gamma = None
-    if args.model == "CMUNeXt_HSPM":
+    if args.model in {"CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR"}:
         hspm_model = model.module if isinstance(model, torch.nn.DataParallel) else model
         hspm_model.prototype_mixer.set_prototype_scale(prototype_scale)
+        if args.model == "CMUNeXt_HSPM_APBR":
+            hspm_model.set_apbr_route_scale(get_apbr_route_scale(args, epoch_num))
         effective_gamma = float(hspm_model.prototype_mixer.effective_gamma().detach().cpu())
         if args.hspm_mixer_mode == "stable":
             effective_gamma *= prototype_scale
@@ -382,6 +455,25 @@ def get_hspm_fusion_diagnostics(model):
         name: float(value.detach().cpu())
         for name, value in diagnostics.items()
     }
+
+
+def get_apbr_diagnostics(model):
+    apbr_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+    diagnostics = apbr_model.get_apbr_diagnostics()
+    if diagnostics is None:
+        return None
+    return {
+        name: float(value.detach().cpu())
+        for name, value in diagnostics.items()
+    }
+
+
+def update_loss_component_meters(avg_meters, components, prefix, batch_size):
+    if components is None:
+        return
+    for name, value in components.items():
+        meter_name = f"{prefix}_loss_{name}"
+        avg_meters[meter_name].update(float(value.detach().cpu()), batch_size)
 
 
 def validate_augmentation_args(args):
@@ -466,6 +558,8 @@ def getDataloader(args):
 
 
 def main(args):
+    if args.model == "CMUNeXt_HSPM_APBR":
+        args.hspm_backbone_mode = "dual_path"
     validate_augmentation_args(args)
     if args.hspm_coarse_loss_weight < 0:
         raise ValueError("hspm_coarse_loss_weight must be non-negative.")
@@ -473,6 +567,12 @@ def main(args):
         raise ValueError("hspm_coarse_loss_final_weight must be non-negative.")
     if args.hspm_coarse_loss_decay_epochs < 0 or args.hspm_prototype_warmup_epochs < 0:
         raise ValueError("HSPM schedule epochs must be non-negative.")
+    if args.apbr_coarse_loss_weight < 0 or args.apbr_coarse_loss_final_weight < 0:
+        raise ValueError("APBR coarse loss weights must be non-negative.")
+    if args.apbr_coarse_loss_decay_epochs < 0 or args.apbr_route_warmup_epochs < 0:
+        raise ValueError("APBR schedule epochs must be non-negative.")
+    if args.apbr_intermediate_loss_weight < 0 or args.apbr_boundary_loss_weight < 0:
+        raise ValueError("APBR auxiliary loss weights must be non-negative.")
     if args.early_stop_patience < 0 or args.early_stop_min_delta < 0:
         raise ValueError("Early stopping settings must be non-negative.")
 
@@ -549,6 +649,27 @@ def main(args):
                       'fusion_injection_deep_rms_ratio': AverageMeter(),
                       'fusion_small_injection_deep_rms_ratio': AverageMeter(),
                       'fusion_large_injection_deep_rms_ratio': AverageMeter()}
+        if args.model == "CMUNeXt_HSPM_APBR":
+            for prefix in ("train", "val"):
+                for component_name in (
+                    "seg",
+                    "coarse_weighted",
+                    "intermediate_weighted",
+                    "boundary_weighted",
+                    "total",
+                ):
+                    avg_meters[f"{prefix}_loss_{component_name}"] = AverageMeter()
+            for stage_name in ("half", "full"):
+                for diagnostic_name in (
+                    "route_scale",
+                    "raw_gate_mean",
+                    "active_gate_mean",
+                    "raw_gate_over_05",
+                    "raw_gate_over_08",
+                    "effective_feature_scale",
+                    "effective_logit_scale",
+                ):
+                    avg_meters[f"apbr_{stage_name}_{diagnostic_name}"] = AverageMeter()
 
         # (您修改的部分)
         train_bar = tqdm(trainloader, desc=f"Epoch {epoch_num}/{max_epoch} [Train]")
@@ -560,15 +681,20 @@ def main(args):
             outputs = forward_with_model(args, model, img_batch)
             seg_logits = get_seg_logits(outputs)
 
-            loss = get_loss_tensor(
-                compute_loss(
-                    args,
-                    criterion,
-                    outputs,
-                    label_batch,
-                    sampled_batch,
-                    aux_weight=current_coarse_weight,
-                )
+            loss_output = compute_loss(
+                args,
+                criterion,
+                outputs,
+                label_batch,
+                sampled_batch,
+                aux_weight=current_coarse_weight,
+            )
+            loss = get_loss_tensor(loss_output)
+            update_loss_component_meters(
+                avg_meters,
+                get_loss_components(loss_output),
+                "train",
+                img_batch.size(0),
             )
             iou, dice, _, _, _, _, _ = iou_score(seg_logits, label_batch)
             optimizer.zero_grad()
@@ -598,7 +724,11 @@ def main(args):
                 img_batch, label_batch = img_batch.cuda(), label_batch.cuda()
                 output = forward_with_model(args, model, img_batch)
                 seg_logits = get_seg_logits(output)
-                fusion_diagnostics = get_hspm_fusion_diagnostics(model) if args.model == "CMUNeXt_HSPM" else None
+                fusion_diagnostics = (
+                    get_hspm_fusion_diagnostics(model)
+                    if args.model in {"CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR"}
+                    else None
+                )
                 if fusion_diagnostics is not None:
                     for diagnostic_name in (
                         "predicted_area",
@@ -619,15 +749,28 @@ def main(args):
                                 ratio_sum / count,
                                 count,
                             )
-                loss = get_loss_tensor(
-                    compute_loss(
-                        args,
-                        criterion,
-                        output,
-                        label_batch,
-                        sampled_batch,
-                        aux_weight=current_coarse_weight,
-                    )
+                if args.model == "CMUNeXt_HSPM_APBR":
+                    apbr_diagnostics = get_apbr_diagnostics(model)
+                    if apbr_diagnostics is not None:
+                        for diagnostic_name, diagnostic_value in apbr_diagnostics.items():
+                            avg_meters[f"apbr_{diagnostic_name}"].update(
+                                diagnostic_value,
+                                img_batch.size(0),
+                            )
+                loss_output = compute_loss(
+                    args,
+                    criterion,
+                    output,
+                    label_batch,
+                    sampled_batch,
+                    aux_weight=current_coarse_weight,
+                )
+                loss = get_loss_tensor(loss_output)
+                update_loss_component_meters(
+                    avg_meters,
+                    get_loss_components(loss_output),
+                    "val",
+                    img_batch.size(0),
                 )
                 avg_meters['val_loss'].update(loss.item(), img_batch.size(0))
                 if args.val_threshold_mode == "scan":
@@ -678,7 +821,7 @@ def main(args):
         # <=== 修改 8: 将 print 替换为 logging.info
         elapsed_time = time.time() - start_time
         elapsed_str = time.strftime('%H:%M:%S', time.gmtime(elapsed_time))
-        if args.model == "CMUNeXt_HSPM":
+        if args.model in {"CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR"}:
             hspm_model = model.module if isinstance(model, torch.nn.DataParallel) else model
             effective_gamma = float(hspm_model.prototype_mixer.effective_gamma().detach().cpu())
             if args.hspm_mixer_mode == "stable":
@@ -732,6 +875,36 @@ def main(args):
                             else f"{avg_meters['fusion_large_injection_deep_rms_ratio'].avg:.6f}"
                         ),
                     )
+            if args.model == "CMUNeXt_HSPM_APBR":
+                for stage_name in ("half", "full"):
+                    logging.info(
+                        "APBR %s diagnostics: route_scale=%.4f - raw_gate_mean=%.6f"
+                        " - active_gate_mean=%.6f - raw_gate>0.5=%.6f - raw_gate>0.8=%.6f"
+                        " - feature_scale=%.6f - logit_scale=%.6f",
+                        stage_name,
+                        avg_meters[f"apbr_{stage_name}_route_scale"].avg,
+                        avg_meters[f"apbr_{stage_name}_raw_gate_mean"].avg,
+                        avg_meters[f"apbr_{stage_name}_active_gate_mean"].avg,
+                        avg_meters[f"apbr_{stage_name}_raw_gate_over_05"].avg,
+                        avg_meters[f"apbr_{stage_name}_raw_gate_over_08"].avg,
+                        avg_meters[f"apbr_{stage_name}_effective_feature_scale"].avg,
+                        avg_meters[f"apbr_{stage_name}_effective_logit_scale"].avg,
+                    )
+                logging.info(
+                    "APBR loss components: train(seg=%.6f - coarse=%.6f - intermediate=%.6f"
+                    " - boundary=%.6f - total=%.6f) - val(seg=%.6f - coarse=%.6f"
+                    " - intermediate=%.6f - boundary=%.6f - total=%.6f)",
+                    avg_meters["train_loss_seg"].avg,
+                    avg_meters["train_loss_coarse_weighted"].avg,
+                    avg_meters["train_loss_intermediate_weighted"].avg,
+                    avg_meters["train_loss_boundary_weighted"].avg,
+                    avg_meters["train_loss_total"].avg,
+                    avg_meters["val_loss_seg"].avg,
+                    avg_meters["val_loss_coarse_weighted"].avg,
+                    avg_meters["val_loss_intermediate_weighted"].avg,
+                    avg_meters["val_loss_boundary_weighted"].avg,
+                    avg_meters["val_loss_total"].avg,
+                )
         if args.val_threshold_mode == "scan":
             logging.info(
                 'epoch [%d/%d] (Total time: %s)  train_loss : %.4f, train_iou: %.4f - val_loss %.4f - val_thr %.4f - '

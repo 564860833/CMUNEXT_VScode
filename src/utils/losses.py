@@ -10,6 +10,7 @@ __all__ = [
     'BoundaryAwareSegLoss',
     'HSPMLoss',
     'UBRDLoss',
+    'APBRLoss',
 ]
 
 
@@ -158,6 +159,63 @@ class UBRDLoss(nn.Module):
         if self.boundary_weight > 0:
             loss = loss + self.boundary_weight * self.boundary_loss(outputs["seg"], target)
         return loss
+
+
+class APBRLoss(nn.Module):
+    def __init__(
+        self,
+        coarse_weight=0.1,
+        intermediate_weight=0.15,
+        boundary_weight=0.1,
+    ):
+        super().__init__()
+        for name, value in (
+            ("coarse_weight", coarse_weight),
+            ("intermediate_weight", intermediate_weight),
+            ("boundary_weight", boundary_weight),
+        ):
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative.")
+        self.coarse_weight = float(coarse_weight)
+        self.intermediate_weight = float(intermediate_weight)
+        self.boundary_weight = float(boundary_weight)
+        self.seg_loss = BCEDiceLoss()
+        self.boundary_loss = SobelBoundaryLoss()
+
+    def forward(self, outputs, target, coarse_weight=None, return_components=False):
+        if not isinstance(outputs, dict):
+            raise TypeError("APBRLoss expects model outputs to be a dictionary.")
+        required_keys = {"seg", "coarse", "refine_half"}
+        missing_keys = required_keys.difference(outputs)
+        if missing_keys:
+            raise KeyError(f"APBRLoss requires output keys: {sorted(required_keys)}.")
+
+        current_coarse_weight = self.coarse_weight if coarse_weight is None else float(coarse_weight)
+        if current_coarse_weight < 0:
+            raise ValueError("coarse_weight must be non-negative.")
+
+        seg = self.seg_loss(outputs["seg"], target)
+        coarse_weighted = seg.new_zeros(())
+        intermediate_weighted = seg.new_zeros(())
+        boundary_weighted = seg.new_zeros(())
+        if current_coarse_weight > 0:
+            coarse_target = F.interpolate(target, size=outputs["coarse"].shape[-2:], mode="nearest")
+            coarse_weighted = current_coarse_weight * self.seg_loss(outputs["coarse"], coarse_target)
+        if self.intermediate_weight > 0:
+            refine_target = F.interpolate(target, size=outputs["refine_half"].shape[-2:], mode="nearest")
+            intermediate_weighted = self.intermediate_weight * self.seg_loss(outputs["refine_half"], refine_target)
+        if self.boundary_weight > 0:
+            boundary_weighted = self.boundary_weight * self.boundary_loss(outputs["seg"], target)
+        total = seg + coarse_weighted + intermediate_weighted + boundary_weighted
+        if not return_components:
+            return total
+        return total, {
+            "seg": seg,
+            "coarse_weighted": coarse_weighted,
+            "intermediate_weighted": intermediate_weighted,
+            "boundary_weighted": boundary_weighted,
+            "total": total,
+        }
 
 
 def compute_kl_loss(p, q):
