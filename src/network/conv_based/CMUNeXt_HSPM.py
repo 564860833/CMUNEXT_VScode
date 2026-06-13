@@ -165,6 +165,9 @@ class CMUNeXt_HSPM(nn.Module):
         hspm_backbone_mode="highres_only",
         hspm_fusion_gate_init=0.05,
         hspm_fusion_gate_max=0.3,
+        hspm_fusion_mode="global",
+        hspm_small_area_threshold=0.05,
+        hspm_small_area_temperature=0.02,
     ):
         super().__init__()
         if num_classes != 1:
@@ -173,12 +176,22 @@ class CMUNeXt_HSPM(nn.Module):
             raise ValueError("hspm_mode must be either 'full' or 'context_only'.")
         if hspm_backbone_mode not in {"highres_only", "dual_path"}:
             raise ValueError("hspm_backbone_mode must be either 'highres_only' or 'dual_path'.")
+        if hspm_fusion_mode not in {"global", "size_aware"}:
+            raise ValueError("hspm_fusion_mode must be either 'global' or 'size_aware'.")
         if not 0.0 < hspm_fusion_gate_init < hspm_fusion_gate_max:
             raise ValueError("hspm_fusion_gate_init must be in (0, hspm_fusion_gate_max).")
+        if not 0.0 < hspm_small_area_threshold < 1.0:
+            raise ValueError("hspm_small_area_threshold must be in (0, 1).")
+        if hspm_small_area_temperature <= 0.0:
+            raise ValueError("hspm_small_area_temperature must be positive.")
 
         self.hspm_mode = hspm_mode
         self.hspm_backbone_mode = hspm_backbone_mode
         self.hspm_fusion_gate_max = float(hspm_fusion_gate_max)
+        self.hspm_fusion_mode = hspm_fusion_mode
+        self.hspm_small_area_threshold = float(hspm_small_area_threshold)
+        self.hspm_small_area_temperature = float(hspm_small_area_temperature)
+        self.last_fusion_diagnostics = None
         self.Maxpool = nn.MaxPool2d(kernel_size=2, stride=2)
 
         self.stem = conv_block(ch_in=input_channel, ch_out=dims[0])
@@ -231,7 +244,57 @@ class CMUNeXt_HSPM(nn.Module):
             return None
         return self.hspm_fusion_gate_max * torch.sigmoid(self.fusion_gate_raw)
 
+    def build_spatial_gate(self, coarse_logits, uncertainty):
+        coarse_prob = torch.sigmoid(coarse_logits).detach()
+        uncertainty = uncertainty.detach()
+        predicted_area = coarse_prob.mean(dim=(2, 3), keepdim=True)
+        smallness = torch.sigmoid(
+            (self.hspm_small_area_threshold - predicted_area)
+            / self.hspm_small_area_temperature
+        )
+        spatial_gate = smallness * coarse_prob + (1.0 - smallness) * uncertainty
+        return spatial_gate, smallness, predicted_area
+
+    def _record_fusion_diagnostics(
+        self,
+        effective_gate,
+        deep_feature,
+        injection,
+        spatial_gate=None,
+        smallness=None,
+        predicted_area=None,
+    ):
+        eps = torch.finfo(deep_feature.dtype).eps
+        injection_rms = injection.detach().square().mean(dim=(1, 2, 3)).sqrt()
+        deep_feature_rms = deep_feature.detach().square().mean(dim=(1, 2, 3)).sqrt().clamp_min(eps)
+        injection_deep_rms_ratio = injection_rms / deep_feature_rms
+        diagnostics = {
+            "effective_fusion_gate": effective_gate.detach().mean(),
+            "injection_deep_rms_ratio": injection_deep_rms_ratio.mean(),
+        }
+        if spatial_gate is not None:
+            sample_area = predicted_area.detach().flatten()
+            small_mask = (sample_area < self.hspm_small_area_threshold).to(injection_deep_rms_ratio.dtype)
+            large_mask = (sample_area > 0.2).to(injection_deep_rms_ratio.dtype)
+            diagnostics.update(
+                {
+                    "predicted_area": sample_area.mean(),
+                    "smallness": smallness.detach().mean(),
+                    "spatial_gate": spatial_gate.detach().mean(),
+                    "small_injection_deep_rms_ratio_sum": (
+                        injection_deep_rms_ratio * small_mask
+                    ).sum(),
+                    "small_injection_count": small_mask.sum(),
+                    "large_injection_deep_rms_ratio_sum": (
+                        injection_deep_rms_ratio * large_mask
+                    ).sum(),
+                    "large_injection_count": large_mask.sum(),
+                }
+            )
+        self.last_fusion_diagnostics = diagnostics
+
     def forward(self, x):
+        self.last_fusion_diagnostics = None
         x1 = self.encoder1(self.stem(x))
         x2 = self.encoder2(self.Maxpool(x1))
         x3 = self.encoder3(self.Maxpool(x2))
@@ -248,7 +311,25 @@ class CMUNeXt_HSPM(nn.Module):
             deep_feature = self.Up5(x5)
             deep_feature = self.Up_conv5(torch.cat((x4, deep_feature), dim=1))
             hspm_residual = self.hspm_projection(hspm_feature)
-            decoder_input = deep_feature + self.effective_fusion_gate() * hspm_residual
+            effective_gate = self.effective_fusion_gate()
+            if self.hspm_fusion_mode == "size_aware":
+                spatial_gate, smallness, predicted_area = self.build_spatial_gate(
+                    coarse_logits,
+                    uncertainty,
+                )
+                injection = effective_gate * spatial_gate * hspm_residual
+                self._record_fusion_diagnostics(
+                    effective_gate,
+                    deep_feature,
+                    injection,
+                    spatial_gate=spatial_gate,
+                    smallness=smallness,
+                    predicted_area=predicted_area,
+                )
+            else:
+                injection = effective_gate * hspm_residual
+                self._record_fusion_diagnostics(effective_gate, deep_feature, injection)
+            decoder_input = deep_feature + injection
         else:
             decoder_input = hspm_feature
 
@@ -283,6 +364,9 @@ def cmunext_hspm(
     hspm_backbone_mode="highres_only",
     hspm_fusion_gate_init=0.05,
     hspm_fusion_gate_max=0.3,
+    hspm_fusion_mode="global",
+    hspm_small_area_threshold=0.05,
+    hspm_small_area_temperature=0.02,
 ):
     return CMUNeXt_HSPM(
         input_channel=input_channel,
@@ -299,4 +383,7 @@ def cmunext_hspm(
         hspm_backbone_mode=hspm_backbone_mode,
         hspm_fusion_gate_init=hspm_fusion_gate_init,
         hspm_fusion_gate_max=hspm_fusion_gate_max,
+        hspm_fusion_mode=hspm_fusion_mode,
+        hspm_small_area_threshold=hspm_small_area_threshold,
+        hspm_small_area_temperature=hspm_small_area_temperature,
     )

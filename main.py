@@ -158,6 +158,12 @@ parser.add_argument('--hspm_fusion_gate_init', type=float, default=0.05,
                     help='Initial effective HSPM residual gate in dual-path mode')
 parser.add_argument('--hspm_fusion_gate_max', type=float, default=0.3,
                     help='Maximum effective HSPM residual gate in dual-path mode')
+parser.add_argument('--hspm_fusion_mode', type=str, default="global", choices=["global", "size_aware"],
+                    help='Use global or size-aware spatial HSPM residual fusion in dual-path mode')
+parser.add_argument('--hspm_small_area_threshold', type=float, default=0.05,
+                    help='Predicted coarse area threshold used by size-aware HSPM fusion')
+parser.add_argument('--hspm_small_area_temperature', type=float, default=0.02,
+                    help='Smoothness of the small-lesion decision in size-aware HSPM fusion')
 parser.add_argument('--hspm_prototype_warmup_epochs', type=int, default=0,
                     help='Epochs used to linearly warm up stable prototype injection')
 parser.add_argument('--hspm_coarse_loss_final_weight', type=float, default=None,
@@ -207,6 +213,9 @@ def get_model(args):
             hspm_backbone_mode=args.hspm_backbone_mode,
             hspm_fusion_gate_init=args.hspm_fusion_gate_init,
             hspm_fusion_gate_max=args.hspm_fusion_gate_max,
+            hspm_fusion_mode=args.hspm_fusion_mode,
+            hspm_small_area_threshold=args.hspm_small_area_threshold,
+            hspm_small_area_temperature=args.hspm_small_area_temperature,
         ).cuda()
     elif args.model == "CMUNeXt_HSPM_UBRD":
         model = cmunext_hspm_ubrd(
@@ -361,6 +370,17 @@ def configure_hspm_epoch(args, model, epoch_num):
     return coarse_weight, prototype_scale, effective_gamma
 
 
+def get_hspm_fusion_diagnostics(model):
+    hspm_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+    diagnostics = getattr(hspm_model, "last_fusion_diagnostics", None)
+    if diagnostics is None:
+        return None
+    return {
+        name: float(value.detach().cpu())
+        for name, value in diagnostics.items()
+    }
+
+
 def getDataloader(args):
     img_size = args.img_size
     if args.model == "SwinUnet":
@@ -488,7 +508,13 @@ def main(args):
                       'val_SP': AverageMeter(),
                       'val_HD95': AverageMeter(),
                       'val_ASSD': AverageMeter(),
-                      'val_ACC': AverageMeter()}
+                      'val_ACC': AverageMeter(),
+                      'fusion_predicted_area': AverageMeter(),
+                      'fusion_smallness': AverageMeter(),
+                      'fusion_spatial_gate': AverageMeter(),
+                      'fusion_injection_deep_rms_ratio': AverageMeter(),
+                      'fusion_small_injection_deep_rms_ratio': AverageMeter(),
+                      'fusion_large_injection_deep_rms_ratio': AverageMeter()}
 
         # (您修改的部分)
         train_bar = tqdm(trainloader, desc=f"Epoch {epoch_num}/{max_epoch} [Train]")
@@ -538,6 +564,27 @@ def main(args):
                 img_batch, label_batch = img_batch.cuda(), label_batch.cuda()
                 output = forward_with_model(args, model, img_batch)
                 seg_logits = get_seg_logits(output)
+                fusion_diagnostics = get_hspm_fusion_diagnostics(model) if args.model == "CMUNeXt_HSPM" else None
+                if fusion_diagnostics is not None:
+                    for diagnostic_name in (
+                        "predicted_area",
+                        "smallness",
+                        "spatial_gate",
+                        "injection_deep_rms_ratio",
+                    ):
+                        if diagnostic_name in fusion_diagnostics:
+                            avg_meters[f"fusion_{diagnostic_name}"].update(
+                                fusion_diagnostics[diagnostic_name],
+                                img_batch.size(0),
+                            )
+                    for area_group in ("small", "large"):
+                        count = fusion_diagnostics.get(f"{area_group}_injection_count", 0.0)
+                        if count > 0:
+                            ratio_sum = fusion_diagnostics[f"{area_group}_injection_deep_rms_ratio_sum"]
+                            avg_meters[f"fusion_{area_group}_injection_deep_rms_ratio"].update(
+                                ratio_sum / count,
+                                count,
+                            )
                 loss = get_loss_tensor(
                     compute_loss(
                         args,
@@ -612,6 +659,45 @@ def main(args):
                 effective_gamma,
                 "n/a" if effective_fusion_gate is None else f"{effective_fusion_gate:.4f}",
             )
+            if avg_meters['fusion_injection_deep_rms_ratio'].count > 0:
+                logging.info(
+                    "HSPM fusion diagnostics: predicted_area=%s - smallness=%s - spatial_gate=%s"
+                    " - injection_deep_rms_ratio=%.6f",
+                    (
+                        "n/a"
+                        if avg_meters['fusion_predicted_area'].count == 0
+                        else f"{avg_meters['fusion_predicted_area'].avg:.6f}"
+                    ),
+                    (
+                        "n/a"
+                        if avg_meters['fusion_smallness'].count == 0
+                        else f"{avg_meters['fusion_smallness'].avg:.6f}"
+                    ),
+                    (
+                        "n/a"
+                        if avg_meters['fusion_spatial_gate'].count == 0
+                        else f"{avg_meters['fusion_spatial_gate'].avg:.6f}"
+                    ),
+                    avg_meters['fusion_injection_deep_rms_ratio'].avg,
+                )
+                if (
+                    avg_meters['fusion_small_injection_deep_rms_ratio'].count > 0
+                    or avg_meters['fusion_large_injection_deep_rms_ratio'].count > 0
+                ):
+                    logging.info(
+                        "HSPM fusion area diagnostics: small_injection_deep_rms_ratio=%s"
+                        " - large_injection_deep_rms_ratio=%s",
+                        (
+                            "n/a"
+                            if avg_meters['fusion_small_injection_deep_rms_ratio'].count == 0
+                            else f"{avg_meters['fusion_small_injection_deep_rms_ratio'].avg:.6f}"
+                        ),
+                        (
+                            "n/a"
+                            if avg_meters['fusion_large_injection_deep_rms_ratio'].count == 0
+                            else f"{avg_meters['fusion_large_injection_deep_rms_ratio'].avg:.6f}"
+                        ),
+                    )
         if args.val_threshold_mode == "scan":
             logging.info(
                 'epoch [%d/%d] (Total time: %s)  train_loss : %.4f, train_iou: %.4f - val_loss %.4f - val_thr %.4f - '

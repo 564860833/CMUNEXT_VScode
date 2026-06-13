@@ -95,6 +95,9 @@ def build_model(args, parser):
             hspm_backbone_mode=args.hspm_backbone_mode,
             hspm_fusion_gate_init=args.hspm_fusion_gate_init,
             hspm_fusion_gate_max=args.hspm_fusion_gate_max,
+            hspm_fusion_mode=args.hspm_fusion_mode,
+            hspm_small_area_threshold=args.hspm_small_area_threshold,
+            hspm_small_area_temperature=args.hspm_small_area_temperature,
         )
     elif args.model == "CMUNeXt_HSPM_UBRD":
         model = cmunext_hspm_ubrd(
@@ -555,6 +558,12 @@ if __name__ == "__main__":
                         help="Initial effective HSPM residual gate in dual-path mode")
     parser.add_argument("--hspm_fusion_gate_max", type=float, default=0.3,
                         help="Maximum effective HSPM residual gate in dual-path mode")
+    parser.add_argument("--hspm_fusion_mode", type=str, default="global", choices=["global", "size_aware"],
+                        help="Use global or size-aware spatial HSPM residual fusion in dual-path mode")
+    parser.add_argument("--hspm_small_area_threshold", type=float, default=0.05,
+                        help="Predicted coarse area threshold used by size-aware HSPM fusion")
+    parser.add_argument("--hspm_small_area_temperature", type=float, default=0.02,
+                        help="Smoothness of the small-lesion decision in size-aware HSPM fusion")
     parser.add_argument("--hspm_prototype_warmup_epochs", type=int, default=0,
                         help="Training-only compatibility option; inference always uses full prototype injection")
     parser.add_argument("--hspm_coarse_loss_final_weight", type=float, default=None,
