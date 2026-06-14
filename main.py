@@ -32,6 +32,7 @@ from src.network.conv_based.CMUNeXt import cmunext
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
 from src.network.conv_based.CMUNeXt_HSPM_APBR import cmunext_hspm_apbr
 from src.network.conv_based.CMUNeXt_HSPM_APBR_V2 import cmunext_hspm_apbr_v2
+from src.network.conv_based.CMUNeXt_HSPM_SDFR import cmunext_hspm_sdfr
 from src.network.conv_based.CMUNeXt_HSPM_UBRD import cmunext_hspm_ubrd
 from src.network.conv_based.CMUNeXt_BA_DualGAG import cmunext_ba_dualgag
 from src.network.conv_based.CMUNeXt_BA_DualGAG_SpeckleEnhance import cmunext_ba_dualgag_speckleenhance
@@ -48,7 +49,8 @@ from src.network.hybrid_based.Mobile_U_ViT import mobileuvit, mobileuvit_l
 
 
 APBR_MODELS = {"CMUNeXt_HSPM_APBR", "CMUNeXt_HSPM_APBR_V2"}
-HSPM_MODELS = {"CMUNeXt_HSPM", *APBR_MODELS}
+SDFR_MODELS = {"CMUNeXt_HSPM_SDFR"}
+HSPM_MODELS = {"CMUNeXt_HSPM", *APBR_MODELS, *SDFR_MODELS}
 
 
 def seed_torch(seed):
@@ -112,7 +114,7 @@ def parse_gag_stages(value):
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default="CMUNeXt",
                     choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR",
-                             "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_UBRD",
+                             "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_SDFR", "CMUNeXt_HSPM_UBRD",
                              "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
                              "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
                              "CMUNeXt_BA_DualGAG_SpeckleEnhance",
@@ -203,6 +205,24 @@ parser.add_argument('--apbr_intermediate_loss_weight', type=float, default=0.15,
                     help='Half-resolution APBR supervision weight')
 parser.add_argument('--apbr_boundary_loss_weight', type=float, default=0.1,
                     help='Final-prediction APBR boundary loss weight')
+parser.add_argument('--sdfr_sdf_loss_weight', type=float, default=0.2,
+                    help='Maximum signed-distance supervision weight')
+parser.add_argument('--sdfr_sdf_warmup_epochs', type=int, default=10,
+                    help='Epochs used to linearly warm up signed-distance supervision')
+parser.add_argument('--sdfr_refine_start_epoch', type=int, default=10,
+                    help='Epoch at which signed-distance refinement starts')
+parser.add_argument('--sdfr_refine_warmup_epochs', type=int, default=30,
+                    help='Epochs used to linearly warm up signed-distance refinement')
+parser.add_argument('--sdfr_truncation_ratio', type=float, default=0.08,
+                    help='SDF truncation distance relative to the shorter image side')
+parser.add_argument('--sdfr_boundary_temperature', type=float, default=0.2,
+                    help='Distance temperature for SDF boundary weighting and gating')
+parser.add_argument('--sdfr_boundary_emphasis', type=float, default=4.0,
+                    help='Extra SDF loss emphasis near the target boundary; 0 disables weighting')
+parser.add_argument('--sdfr_refine_scale_init', type=float, default=0.05,
+                    help='Initial effective SDF refinement residual scale')
+parser.add_argument('--sdfr_refine_scale_max', type=float, default=0.3,
+                    help='Maximum effective SDF refinement residual scale')
 parser.add_argument('--val_threshold_mode', type=str, default="fixed", choices=["fixed", "scan"],
                     help='Use a fixed validation threshold or scan a threshold range')
 parser.add_argument('--val_threshold', type=float, default=0.5,
@@ -274,6 +294,24 @@ def get_model(args):
             hspm_small_area_temperature=args.hspm_small_area_temperature,
             apbr_mode=args.apbr_mode,
         ).cuda()
+    elif args.model == "CMUNeXt_HSPM_SDFR":
+        model = cmunext_hspm_sdfr(
+            num_classes=args.num_classes,
+            hspm_mode=args.hspm_mode,
+            hspm_mixer_mode=args.hspm_mixer_mode,
+            hspm_gamma_init=args.hspm_gamma_init,
+            hspm_gamma_max=args.hspm_gamma_max,
+            hspm_temperature=args.hspm_temperature,
+            hspm_prototype_dropout=args.hspm_prototype_dropout,
+            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
+            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
+            hspm_fusion_mode=args.hspm_fusion_mode,
+            hspm_small_area_threshold=args.hspm_small_area_threshold,
+            hspm_small_area_temperature=args.hspm_small_area_temperature,
+            sdfr_boundary_temperature=args.sdfr_boundary_temperature,
+            sdfr_refine_scale_init=args.sdfr_refine_scale_init,
+            sdfr_refine_scale_max=args.sdfr_refine_scale_max,
+        ).cuda()
     elif args.model == "CMUNeXt_HSPM_UBRD":
         model = cmunext_hspm_ubrd(
             num_classes=args.num_classes,
@@ -331,6 +369,13 @@ def get_model(args):
 
 
 def get_criterion(args):
+    if args.model in SDFR_MODELS:
+        return losses.__dict__['SDFRLoss'](
+            coarse_weight=args.hspm_coarse_loss_weight,
+            sdf_weight=args.sdfr_sdf_loss_weight,
+            boundary_temperature=args.sdfr_boundary_temperature,
+            boundary_emphasis=args.sdfr_boundary_emphasis,
+        ).cuda()
     if args.model in APBR_MODELS:
         return losses.__dict__['APBRLoss'](
             coarse_weight=args.apbr_coarse_loss_weight,
@@ -398,7 +443,26 @@ def build_validation_thresholds(args):
     return sorted(set(thresholds))
 
 
-def compute_loss(args, criterion, outputs, label_batch, sampled_batch=None, aux_weight=None):
+def compute_loss(
+    args,
+    criterion,
+    outputs,
+    label_batch,
+    sampled_batch=None,
+    aux_weight=None,
+    sdf_weight=None,
+):
+    if args.model in SDFR_MODELS:
+        if sampled_batch is None or "sdf" not in sampled_batch:
+            raise KeyError("CMUNeXt_HSPM_SDFR requires sampled_batch['sdf'].")
+        return criterion(
+            outputs,
+            label_batch,
+            sampled_batch["sdf"].to(label_batch.device),
+            coarse_weight=aux_weight,
+            sdf_weight=sdf_weight,
+            return_components=True,
+        )
     if args.model in APBR_MODELS:
         return criterion(
             outputs,
@@ -441,6 +505,25 @@ def get_apbr_route_scale(args, epoch_num):
     return min(max(float(epoch_num + 1) / warmup_epochs, 0.0), 1.0)
 
 
+def get_sdfr_sdf_weight(args, epoch_num):
+    max_weight = float(args.sdfr_sdf_loss_weight)
+    warmup_epochs = int(args.sdfr_sdf_warmup_epochs)
+    if warmup_epochs <= 0:
+        return max_weight
+    scale = min(max(float(epoch_num) / warmup_epochs, 0.0), 1.0)
+    return max_weight * scale
+
+
+def get_sdfr_refine_schedule_scale(args, epoch_num):
+    start_epoch = int(args.sdfr_refine_start_epoch)
+    warmup_epochs = int(args.sdfr_refine_warmup_epochs)
+    if epoch_num < start_epoch:
+        return 0.0
+    if warmup_epochs <= 0:
+        return 1.0
+    return min(max(float(epoch_num - start_epoch) / warmup_epochs, 0.0), 1.0)
+
+
 def get_hspm_prototype_scale(args, epoch_num):
     if args.model not in HSPM_MODELS or args.hspm_mixer_mode != "stable":
         return 1.0
@@ -462,6 +545,10 @@ def configure_hspm_epoch(args, model, epoch_num):
         hspm_model.prototype_mixer.set_prototype_scale(prototype_scale)
         if args.model in APBR_MODELS:
             hspm_model.set_apbr_route_scale(get_apbr_route_scale(args, epoch_num))
+        if args.model in SDFR_MODELS:
+            hspm_model.set_sdfr_refine_schedule_scale(
+                get_sdfr_refine_schedule_scale(args, epoch_num)
+            )
         effective_gamma = float(hspm_model.prototype_mixer.effective_gamma().detach().cpu())
         if args.hspm_mixer_mode == "stable":
             effective_gamma *= prototype_scale
@@ -482,6 +569,17 @@ def get_hspm_fusion_diagnostics(model):
 def get_apbr_diagnostics(model):
     apbr_model = model.module if isinstance(model, torch.nn.DataParallel) else model
     diagnostics = apbr_model.get_apbr_diagnostics()
+    if diagnostics is None:
+        return None
+    return {
+        name: float(value.detach().cpu())
+        for name, value in diagnostics.items()
+    }
+
+
+def get_sdfr_diagnostics(model):
+    sdfr_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+    diagnostics = sdfr_model.get_sdfr_diagnostics()
     if diagnostics is None:
         return None
     return {
@@ -567,9 +665,13 @@ def getDataloader(args):
     ])
     db_train = MedicalDataSets(base_dir=args.base_dir, split="train",
                                transform=train_transform, train_file_dir=args.train_file_dir,
-                               val_file_dir=args.val_file_dir)
+                               val_file_dir=args.val_file_dir,
+                               return_sdf=args.model in SDFR_MODELS,
+                               sdf_truncation_ratio=args.sdfr_truncation_ratio)
     db_val = MedicalDataSets(base_dir=args.base_dir, split="val", transform=val_transform,
-                             train_file_dir=args.train_file_dir, val_file_dir=args.val_file_dir)
+                             train_file_dir=args.train_file_dir, val_file_dir=args.val_file_dir,
+                             return_sdf=args.model in SDFR_MODELS,
+                             sdf_truncation_ratio=args.sdfr_truncation_ratio)
     # <=== 修改 5: 将 print 替换为 logging.info
     logging.info("train num:{}, val num:{}".format(len(db_train), len(db_val)))
 
@@ -580,7 +682,7 @@ def getDataloader(args):
 
 
 def main(args):
-    if args.model in APBR_MODELS:
+    if args.model in {*APBR_MODELS, *SDFR_MODELS}:
         args.hspm_backbone_mode = "dual_path"
     validate_augmentation_args(args)
     if args.hspm_coarse_loss_weight < 0:
@@ -595,6 +697,20 @@ def main(args):
         raise ValueError("APBR schedule epochs must be non-negative.")
     if args.apbr_intermediate_loss_weight < 0 or args.apbr_boundary_loss_weight < 0:
         raise ValueError("APBR auxiliary loss weights must be non-negative.")
+    if args.sdfr_sdf_loss_weight < 0:
+        raise ValueError("SDFR SDF loss weight must be non-negative.")
+    if args.sdfr_boundary_emphasis < 0:
+        raise ValueError("SDFR boundary emphasis must be non-negative.")
+    if (
+        args.sdfr_sdf_warmup_epochs < 0
+        or args.sdfr_refine_start_epoch < 0
+        or args.sdfr_refine_warmup_epochs < 0
+    ):
+        raise ValueError("SDFR schedule epochs must be non-negative.")
+    if args.sdfr_truncation_ratio <= 0 or args.sdfr_boundary_temperature <= 0:
+        raise ValueError("SDFR truncation ratio and boundary temperature must be positive.")
+    if not 0.0 < args.sdfr_refine_scale_init < args.sdfr_refine_scale_max:
+        raise ValueError("SDFR refine scale init must be in (0, refine scale max).")
     if args.early_stop_patience < 0 or args.early_stop_min_delta < 0:
         raise ValueError("Early stopping settings must be non-negative.")
 
@@ -653,6 +769,11 @@ def main(args):
 
     for epoch_num in range(max_epoch):
         current_coarse_weight, prototype_scale, effective_gamma = configure_hspm_epoch(args, model, epoch_num)
+        current_sdfr_sdf_weight = (
+            get_sdfr_sdf_weight(args, epoch_num)
+            if args.model in SDFR_MODELS
+            else 0.0
+        )
         model.train()
         avg_meters = {'loss': AverageMeter(),
                       'iou': AverageMeter(),
@@ -704,6 +825,24 @@ def main(args):
                     "effective_logit_scale",
                 ):
                     avg_meters[f"apbr_{stage_name}_{diagnostic_name}"] = AverageMeter()
+        if args.model in SDFR_MODELS:
+            for prefix in ("train", "val"):
+                for component_name in (
+                    "seg",
+                    "coarse_weighted",
+                    "sdf_weighted",
+                    "total",
+                ):
+                    avg_meters[f"{prefix}_loss_{component_name}"] = AverageMeter()
+            for diagnostic_name in (
+                "schedule_scale",
+                "effective_refine_scale",
+                "boundary_gate_mean",
+                "boundary_gate_over_05",
+                "sdf_abs_mean",
+                "residual_abs_mean",
+            ):
+                avg_meters[f"sdfr_{diagnostic_name}"] = AverageMeter()
 
         # (您修改的部分)
         train_bar = tqdm(trainloader, desc=f"Epoch {epoch_num}/{max_epoch} [Train]")
@@ -722,6 +861,7 @@ def main(args):
                 label_batch,
                 sampled_batch,
                 aux_weight=current_coarse_weight,
+                sdf_weight=current_sdfr_sdf_weight,
             )
             loss = get_loss_tensor(loss_output)
             update_loss_component_meters(
@@ -791,6 +931,14 @@ def main(args):
                                 diagnostic_value,
                                 img_batch.size(0),
                             )
+                if args.model in SDFR_MODELS:
+                    sdfr_diagnostics = get_sdfr_diagnostics(model)
+                    if sdfr_diagnostics is not None:
+                        for diagnostic_name, diagnostic_value in sdfr_diagnostics.items():
+                            avg_meters[f"sdfr_{diagnostic_name}"].update(
+                                diagnostic_value,
+                                img_batch.size(0),
+                            )
                 loss_output = compute_loss(
                     args,
                     criterion,
@@ -798,6 +946,7 @@ def main(args):
                     label_batch,
                     sampled_batch,
                     aux_weight=current_coarse_weight,
+                    sdf_weight=current_sdfr_sdf_weight,
                 )
                 loss = get_loss_tensor(loss_output)
                 update_loss_component_meters(
@@ -957,6 +1106,35 @@ def main(args):
                     avg_meters["val_loss_coarse_weighted"].avg,
                     avg_meters["val_loss_intermediate_weighted"].avg,
                     avg_meters["val_loss_boundary_weighted"].avg,
+                    avg_meters["val_loss_total"].avg,
+                )
+            if args.model in SDFR_MODELS:
+                logging.info(
+                    "SDFR schedule: sdf_weight=%.4f - refine_schedule_scale=%.4f"
+                    " - effective_refine_scale=%.6f",
+                    current_sdfr_sdf_weight,
+                    avg_meters["sdfr_schedule_scale"].avg,
+                    avg_meters["sdfr_effective_refine_scale"].avg,
+                )
+                logging.info(
+                    "SDFR diagnostics: boundary_gate_mean=%.6f - boundary_gate>0.5=%.6f"
+                    " - sdf_abs_mean=%.6f - residual_abs_mean=%.6f",
+                    avg_meters["sdfr_boundary_gate_mean"].avg,
+                    avg_meters["sdfr_boundary_gate_over_05"].avg,
+                    avg_meters["sdfr_sdf_abs_mean"].avg,
+                    avg_meters["sdfr_residual_abs_mean"].avg,
+                )
+                logging.info(
+                    "SDFR loss components: train(seg=%.6f - coarse=%.6f - sdf=%.6f"
+                    " - total=%.6f) - val(seg=%.6f - coarse=%.6f - sdf=%.6f"
+                    " - total=%.6f)",
+                    avg_meters["train_loss_seg"].avg,
+                    avg_meters["train_loss_coarse_weighted"].avg,
+                    avg_meters["train_loss_sdf_weighted"].avg,
+                    avg_meters["train_loss_total"].avg,
+                    avg_meters["val_loss_seg"].avg,
+                    avg_meters["val_loss_coarse_weighted"].avg,
+                    avg_meters["val_loss_sdf_weighted"].avg,
                     avg_meters["val_loss_total"].avg,
                 )
         if args.val_threshold_mode == "scan":

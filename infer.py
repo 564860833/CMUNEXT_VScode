@@ -17,6 +17,7 @@ from src.network.conv_based.CMUNeXt import cmunext
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
 from src.network.conv_based.CMUNeXt_HSPM_APBR import cmunext_hspm_apbr
 from src.network.conv_based.CMUNeXt_HSPM_APBR_V2 import cmunext_hspm_apbr_v2
+from src.network.conv_based.CMUNeXt_HSPM_SDFR import cmunext_hspm_sdfr
 from src.network.conv_based.CMUNeXt_HSPM_UBRD import cmunext_hspm_ubrd
 from src.network.conv_based.CMUNeXt_BA_DualGAG import cmunext_ba_dualgag
 from src.network.conv_based.CMUNeXt_BA_DualGAG_SpeckleEnhance import cmunext_ba_dualgag_speckleenhance
@@ -33,7 +34,8 @@ from src.network.transfomer_based.transformer_based_network import get_transform
 
 
 APBR_MODELS = {"CMUNeXt_HSPM_APBR", "CMUNeXt_HSPM_APBR_V2"}
-HSPM_MODELS = {"CMUNeXt_HSPM", *APBR_MODELS}
+SDFR_MODELS = {"CMUNeXt_HSPM_SDFR"}
+HSPM_MODELS = {"CMUNeXt_HSPM", *APBR_MODELS, *SDFR_MODELS}
 
 
 def parse_gag_stages(value):
@@ -136,6 +138,24 @@ def build_model(args, parser):
             hspm_small_area_threshold=args.hspm_small_area_threshold,
             hspm_small_area_temperature=args.hspm_small_area_temperature,
             apbr_mode=args.apbr_mode,
+        )
+    elif args.model == "CMUNeXt_HSPM_SDFR":
+        model = cmunext_hspm_sdfr(
+            num_classes=args.num_classes,
+            hspm_mode=args.hspm_mode,
+            hspm_mixer_mode=args.hspm_mixer_mode,
+            hspm_gamma_init=args.hspm_gamma_init,
+            hspm_gamma_max=args.hspm_gamma_max,
+            hspm_temperature=args.hspm_temperature,
+            hspm_prototype_dropout=args.hspm_prototype_dropout,
+            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
+            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
+            hspm_fusion_mode=args.hspm_fusion_mode,
+            hspm_small_area_threshold=args.hspm_small_area_threshold,
+            hspm_small_area_temperature=args.hspm_small_area_temperature,
+            sdfr_boundary_temperature=args.sdfr_boundary_temperature,
+            sdfr_refine_scale_init=args.sdfr_refine_scale_init,
+            sdfr_refine_scale_max=args.sdfr_refine_scale_max,
         )
     elif args.model == "CMUNeXt_HSPM_UBRD":
         model = cmunext_hspm_ubrd(
@@ -451,7 +471,13 @@ def validate(model, val_loader, criterion, device, args, save_dir="validation_re
             img_batch, label_batch = img_batch.to(device), label_batch.to(device)
             outputs = forward_with_model(model, args.model, img_batch)
             seg_logits = get_seg_logits(outputs)
-            if args.model in {*HSPM_MODELS, "CMUNeXt_HSPM_UBRD"}:
+            if args.model in SDFR_MODELS:
+                loss = criterion(
+                    outputs,
+                    label_batch,
+                    sampled_batch["sdf"].to(device),
+                )
+            elif args.model in {*HSPM_MODELS, "CMUNeXt_HSPM_UBRD"}:
                 loss = criterion(outputs, label_batch)
             else:
                 loss = criterion(seg_logits, label_batch)
@@ -544,7 +570,7 @@ if __name__ == "__main__":
 
     model_choices = [
         "CMUNet", "CMUNeXt", "CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR",
-        "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_UBRD",
+        "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_SDFR", "CMUNeXt_HSPM_UBRD",
         "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
         "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
         "CMUNeXt_BA_DualGAG_SpeckleEnhance",
@@ -632,6 +658,24 @@ if __name__ == "__main__":
                         help="Half-resolution APBR supervision weight")
     parser.add_argument("--apbr_boundary_loss_weight", type=float, default=0.1,
                         help="Final-prediction APBR boundary loss weight")
+    parser.add_argument("--sdfr_sdf_loss_weight", type=float, default=0.2,
+                        help="Signed-distance supervision weight")
+    parser.add_argument("--sdfr_sdf_warmup_epochs", type=int, default=10,
+                        help="Training-only compatibility option")
+    parser.add_argument("--sdfr_refine_start_epoch", type=int, default=10,
+                        help="Training-only compatibility option")
+    parser.add_argument("--sdfr_refine_warmup_epochs", type=int, default=30,
+                        help="Training-only compatibility option")
+    parser.add_argument("--sdfr_truncation_ratio", type=float, default=0.08,
+                        help="SDF truncation distance relative to the shorter image side")
+    parser.add_argument("--sdfr_boundary_temperature", type=float, default=0.2,
+                        help="Distance temperature for SDF boundary weighting and gating")
+    parser.add_argument("--sdfr_boundary_emphasis", type=float, default=4.0,
+                        help="Extra SDF loss emphasis near the target boundary; 0 disables weighting")
+    parser.add_argument("--sdfr_refine_scale_init", type=float, default=0.05,
+                        help="Initial effective SDF refinement residual scale")
+    parser.add_argument("--sdfr_refine_scale_max", type=float, default=0.3,
+                        help="Maximum effective SDF refinement residual scale")
     parser.add_argument("--val_threshold_mode", type=str, default="fixed", choices=["fixed", "scan"],
                         help="Use a fixed validation threshold or scan a threshold range")
     parser.add_argument("--val_threshold", type=float, default=0.5,
@@ -650,7 +694,7 @@ if __name__ == "__main__":
                         help="Case name to visualize when visual_mode=selected")
     args = parser.parse_args()
 
-    if args.model in APBR_MODELS:
+    if args.model in {*APBR_MODELS, *SDFR_MODELS}:
         args.hspm_backbone_mode = "dual_path"
     if args.visual_mode == "selected" and not args.visual_case:
         parser.error("--visual_case is required when --visual_mode selected")
@@ -669,10 +713,19 @@ if __name__ == "__main__":
         transform=val_transform,
         train_file_dir=args.train_file_dir,
         val_file_dir=args.val_file_dir,
+        return_sdf=args.model in SDFR_MODELS,
+        sdf_truncation_ratio=args.sdfr_truncation_ratio,
     )
     val_loader = DataLoader(db_val, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
-    if args.model in APBR_MODELS:
+    if args.model in SDFR_MODELS:
+        criterion = losses.__dict__["SDFRLoss"](
+            coarse_weight=args.hspm_coarse_loss_weight,
+            sdf_weight=args.sdfr_sdf_loss_weight,
+            boundary_temperature=args.sdfr_boundary_temperature,
+            boundary_emphasis=args.sdfr_boundary_emphasis,
+        ).to(device)
+    elif args.model in APBR_MODELS:
         criterion = losses.__dict__["APBRLoss"](
             coarse_weight=args.apbr_coarse_loss_weight,
             intermediate_weight=args.apbr_intermediate_loss_weight,

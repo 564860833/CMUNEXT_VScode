@@ -140,6 +140,30 @@ python main.py --model CMUNeXt_HSPM_APBR_V2 \
   --apbr_boundary_loss_weight 0
 ```
 
+`CMUNeXt_HSPM_SDFR` adds signed-distance supervision and delayed, bounded
+boundary refinement to the strongest dual-path HSPM baseline. SDF supervision
+warms up during epochs 0-10; refinement stays disabled until epoch 10 and then
+warms up through epoch 40:
+
+```bash
+python main.py --model CMUNeXt_HSPM_SDFR \
+  --base_dir ./data/busi --train_file_dir busi_train3.txt --val_file_dir busi_val3.txt \
+  --save_dir ./checkpoint/6.15/busi-CMUNeXt_HSPM_SDFR-full-3-a \
+  --base_lr 0.01 --epoch 300 --batch_size 8 \
+  --hspm_fusion_mode global --hspm_mixer_mode legacy \
+  --hspm_coarse_loss_weight 0.1 --hspm_coarse_loss_final_weight 0.02 \
+  --hspm_coarse_loss_decay_epochs 150 \
+  --sdfr_sdf_loss_weight 0.2 --sdfr_sdf_warmup_epochs 10 \
+  --sdfr_refine_start_epoch 10 --sdfr_refine_warmup_epochs 30 \
+  --sdfr_truncation_ratio 0.08 --sdfr_boundary_temperature 0.2 \
+  --sdfr_boundary_emphasis 4.0 \
+  --sdfr_refine_scale_init 0.05 --sdfr_refine_scale_max 0.3
+```
+
+For SDF-only ablations, keep refinement disabled with
+`--sdfr_refine_start_epoch 300`. Use `--sdfr_sdf_warmup_epochs 0` for fixed
+SDF weighting, or `--sdfr_boundary_emphasis 0` to remove boundary weighting.
+
 ## Inference
 
 ```python

@@ -11,6 +11,7 @@ __all__ = [
     'HSPMLoss',
     'UBRDLoss',
     'APBRLoss',
+    'SDFRLoss',
 ]
 
 
@@ -214,6 +215,104 @@ class APBRLoss(nn.Module):
             "coarse_weighted": coarse_weighted,
             "intermediate_weighted": intermediate_weighted,
             "boundary_weighted": boundary_weighted,
+            "total": total,
+        }
+
+
+class SDFRLoss(nn.Module):
+    def __init__(
+        self,
+        coarse_weight=0.1,
+        sdf_weight=0.2,
+        boundary_temperature=0.2,
+        boundary_emphasis=4.0,
+    ):
+        super().__init__()
+        for name, value in (
+            ("coarse_weight", coarse_weight),
+            ("sdf_weight", sdf_weight),
+            ("boundary_emphasis", boundary_emphasis),
+        ):
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative.")
+        if boundary_temperature <= 0:
+            raise ValueError("boundary_temperature must be positive.")
+        self.coarse_weight = float(coarse_weight)
+        self.sdf_weight = float(sdf_weight)
+        self.boundary_temperature = float(boundary_temperature)
+        self.boundary_emphasis = float(boundary_emphasis)
+        self.seg_loss = BCEDiceLoss()
+
+    def forward(
+        self,
+        outputs,
+        target,
+        target_sdf,
+        coarse_weight=None,
+        sdf_weight=None,
+        return_components=False,
+    ):
+        if not isinstance(outputs, dict):
+            raise TypeError("SDFRLoss expects model outputs to be a dictionary.")
+        required_keys = {"seg", "coarse", "sdf"}
+        missing_keys = required_keys.difference(outputs)
+        if missing_keys:
+            raise KeyError(f"SDFRLoss requires output keys: {sorted(required_keys)}.")
+        if target_sdf is None:
+            raise ValueError("target_sdf is required for SDFRLoss.")
+
+        current_coarse_weight = (
+            self.coarse_weight if coarse_weight is None else float(coarse_weight)
+        )
+        current_sdf_weight = (
+            self.sdf_weight if sdf_weight is None else float(sdf_weight)
+        )
+        if current_coarse_weight < 0 or current_sdf_weight < 0:
+            raise ValueError("Dynamic SDFR loss weights must be non-negative.")
+
+        seg = self.seg_loss(outputs["seg"], target)
+        coarse_weighted = seg.new_zeros(())
+        sdf_weighted = seg.new_zeros(())
+        if current_coarse_weight > 0:
+            coarse_target = F.interpolate(
+                target,
+                size=outputs["coarse"].shape[-2:],
+                mode="nearest",
+            )
+            coarse_weighted = current_coarse_weight * self.seg_loss(
+                outputs["coarse"],
+                coarse_target,
+            )
+        if current_sdf_weight > 0:
+            target_sdf = target_sdf.to(
+                device=outputs["sdf"].device,
+                dtype=outputs["sdf"].dtype,
+            )
+            if target_sdf.shape != outputs["sdf"].shape:
+                target_sdf = F.interpolate(
+                    target_sdf,
+                    size=outputs["sdf"].shape[-2:],
+                    mode="bilinear",
+                    align_corners=False,
+                )
+            weights = 1.0 + self.boundary_emphasis * torch.exp(
+                -target_sdf.abs() / self.boundary_temperature
+            )
+            sdf_elementwise = F.smooth_l1_loss(
+                outputs["sdf"],
+                target_sdf,
+                reduction="none",
+            )
+            sdf_loss = (weights * sdf_elementwise).sum() / weights.sum().clamp_min(1e-6)
+            sdf_weighted = current_sdf_weight * sdf_loss
+
+        total = seg + coarse_weighted + sdf_weighted
+        if not return_components:
+            return total
+        return total, {
+            "seg": seg,
+            "coarse_weighted": coarse_weighted,
+            "sdf_weighted": sdf_weighted,
             "total": total,
         }
 
