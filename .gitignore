@@ -30,6 +30,9 @@ results/
 # Local presentation/build helper scripts
 scripts/
 tools/
+!tools/
+tools/*
+!tools/evaluate_apbr_oracle_recovery.py
 
 # Model weights and experiment arrays
 *.pth

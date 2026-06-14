@@ -31,6 +31,7 @@ from src.network.conv_based.UNet3plus import UNet3plus
 from src.network.conv_based.CMUNeXt import cmunext
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
 from src.network.conv_based.CMUNeXt_HSPM_APBR import cmunext_hspm_apbr
+from src.network.conv_based.CMUNeXt_HSPM_APBR_V2 import cmunext_hspm_apbr_v2
 from src.network.conv_based.CMUNeXt_HSPM_UBRD import cmunext_hspm_ubrd
 from src.network.conv_based.CMUNeXt_BA_DualGAG import cmunext_ba_dualgag
 from src.network.conv_based.CMUNeXt_BA_DualGAG_SpeckleEnhance import cmunext_ba_dualgag_speckleenhance
@@ -44,6 +45,10 @@ from src.network.conv_based.MK_UNet import MK_UNet
 from src.network.transfomer_based.transformer_based_network import get_transformer_based_model
 
 from src.network.hybrid_based.Mobile_U_ViT import mobileuvit, mobileuvit_l
+
+
+APBR_MODELS = {"CMUNeXt_HSPM_APBR", "CMUNeXt_HSPM_APBR_V2"}
+HSPM_MODELS = {"CMUNeXt_HSPM", *APBR_MODELS}
 
 
 def seed_torch(seed):
@@ -106,7 +111,8 @@ def parse_gag_stages(value):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default="CMUNeXt",
-                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR", "CMUNeXt_HSPM_UBRD",
+                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR",
+                             "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_UBRD",
                              "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
                              "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
                              "CMUNeXt_BA_DualGAG_SpeckleEnhance",
@@ -184,7 +190,7 @@ parser.add_argument('--ubrd_boundary_loss_weight', type=float, default=0.0,
                     help='Optional final-prediction boundary loss weight for CMUNeXt_HSPM_UBRD')
 parser.add_argument('--apbr_mode', type=str, default="full",
                     choices=["full", "no_ambiguity", "no_detail"],
-                    help='APBR ablation mode for CMUNeXt_HSPM_APBR')
+                    help='APBR ablation mode for CMUNeXt_HSPM_APBR and CMUNeXt_HSPM_APBR_V2')
 parser.add_argument('--apbr_route_warmup_epochs', type=int, default=30,
                     help='Epochs used to linearly warm up APBR ambiguity routing')
 parser.add_argument('--apbr_coarse_loss_weight', type=float, default=0.1,
@@ -238,6 +244,22 @@ def get_model(args):
         ).cuda()
     elif args.model == "CMUNeXt_HSPM_APBR":
         model = cmunext_hspm_apbr(
+            num_classes=args.num_classes,
+            hspm_mode=args.hspm_mode,
+            hspm_mixer_mode=args.hspm_mixer_mode,
+            hspm_gamma_init=args.hspm_gamma_init,
+            hspm_gamma_max=args.hspm_gamma_max,
+            hspm_temperature=args.hspm_temperature,
+            hspm_prototype_dropout=args.hspm_prototype_dropout,
+            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
+            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
+            hspm_fusion_mode=args.hspm_fusion_mode,
+            hspm_small_area_threshold=args.hspm_small_area_threshold,
+            hspm_small_area_temperature=args.hspm_small_area_temperature,
+            apbr_mode=args.apbr_mode,
+        ).cuda()
+    elif args.model == "CMUNeXt_HSPM_APBR_V2":
+        model = cmunext_hspm_apbr_v2(
             num_classes=args.num_classes,
             hspm_mode=args.hspm_mode,
             hspm_mixer_mode=args.hspm_mixer_mode,
@@ -309,7 +331,7 @@ def get_model(args):
 
 
 def get_criterion(args):
-    if args.model == "CMUNeXt_HSPM_APBR":
+    if args.model in APBR_MODELS:
         return losses.__dict__['APBRLoss'](
             coarse_weight=args.apbr_coarse_loss_weight,
             intermediate_weight=args.apbr_intermediate_loss_weight,
@@ -377,7 +399,7 @@ def build_validation_thresholds(args):
 
 
 def compute_loss(args, criterion, outputs, label_batch, sampled_batch=None, aux_weight=None):
-    if args.model == "CMUNeXt_HSPM_APBR":
+    if args.model in APBR_MODELS:
         return criterion(
             outputs,
             label_batch,
@@ -420,7 +442,7 @@ def get_apbr_route_scale(args, epoch_num):
 
 
 def get_hspm_prototype_scale(args, epoch_num):
-    if args.model not in {"CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR"} or args.hspm_mixer_mode != "stable":
+    if args.model not in HSPM_MODELS or args.hspm_mixer_mode != "stable":
         return 1.0
     warmup_epochs = int(args.hspm_prototype_warmup_epochs)
     if warmup_epochs <= 0:
@@ -429,16 +451,16 @@ def get_hspm_prototype_scale(args, epoch_num):
 
 
 def configure_hspm_epoch(args, model, epoch_num):
-    if args.model == "CMUNeXt_HSPM_APBR":
+    if args.model in APBR_MODELS:
         coarse_weight = get_apbr_coarse_weight(args, epoch_num)
     else:
         coarse_weight = get_hspm_coarse_weight(args, epoch_num)
     prototype_scale = get_hspm_prototype_scale(args, epoch_num)
     effective_gamma = None
-    if args.model in {"CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR"}:
+    if args.model in HSPM_MODELS:
         hspm_model = model.module if isinstance(model, torch.nn.DataParallel) else model
         hspm_model.prototype_mixer.set_prototype_scale(prototype_scale)
-        if args.model == "CMUNeXt_HSPM_APBR":
+        if args.model in APBR_MODELS:
             hspm_model.set_apbr_route_scale(get_apbr_route_scale(args, epoch_num))
         effective_gamma = float(hspm_model.prototype_mixer.effective_gamma().detach().cpu())
         if args.hspm_mixer_mode == "stable":
@@ -558,7 +580,7 @@ def getDataloader(args):
 
 
 def main(args):
-    if args.model == "CMUNeXt_HSPM_APBR":
+    if args.model in APBR_MODELS:
         args.hspm_backbone_mode = "dual_path"
     validate_augmentation_args(args)
     if args.hspm_coarse_loss_weight < 0:
@@ -649,7 +671,7 @@ def main(args):
                       'fusion_injection_deep_rms_ratio': AverageMeter(),
                       'fusion_small_injection_deep_rms_ratio': AverageMeter(),
                       'fusion_large_injection_deep_rms_ratio': AverageMeter()}
-        if args.model == "CMUNeXt_HSPM_APBR":
+        if args.model in APBR_MODELS:
             for prefix in ("train", "val"):
                 for component_name in (
                     "seg",
@@ -666,6 +688,18 @@ def main(args):
                     "active_gate_mean",
                     "raw_gate_over_05",
                     "raw_gate_over_08",
+                    "ambiguity_gate_mean",
+                    "oracle_recovery_target_mean",
+                    "oracle_recovery_gate_mean",
+                    "combined_gate_mean",
+                    "recovery_added_mean",
+                    "recovery_dominant_ratio",
+                    "base_probability_mean",
+                    "feature_logit_delta_abs_mean",
+                    "correction_logit_abs_mean",
+                    "correction_logit_abs_p99",
+                    "correction_logit_abs_max",
+                    "total_logit_delta_abs_mean",
                     "effective_feature_scale",
                     "effective_logit_scale",
                 ):
@@ -726,7 +760,7 @@ def main(args):
                 seg_logits = get_seg_logits(output)
                 fusion_diagnostics = (
                     get_hspm_fusion_diagnostics(model)
-                    if args.model in {"CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR"}
+                    if args.model in HSPM_MODELS
                     else None
                 )
                 if fusion_diagnostics is not None:
@@ -749,7 +783,7 @@ def main(args):
                                 ratio_sum / count,
                                 count,
                             )
-                if args.model == "CMUNeXt_HSPM_APBR":
+                if args.model in APBR_MODELS:
                     apbr_diagnostics = get_apbr_diagnostics(model)
                     if apbr_diagnostics is not None:
                         for diagnostic_name, diagnostic_value in apbr_diagnostics.items():
@@ -821,7 +855,7 @@ def main(args):
         # <=== 修改 8: 将 print 替换为 logging.info
         elapsed_time = time.time() - start_time
         elapsed_str = time.strftime('%H:%M:%S', time.gmtime(elapsed_time))
-        if args.model in {"CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR"}:
+        if args.model in HSPM_MODELS:
             hspm_model = model.module if isinstance(model, torch.nn.DataParallel) else model
             effective_gamma = float(hspm_model.prototype_mixer.effective_gamma().detach().cpu())
             if args.hspm_mixer_mode == "stable":
@@ -875,21 +909,41 @@ def main(args):
                             else f"{avg_meters['fusion_large_injection_deep_rms_ratio'].avg:.6f}"
                         ),
                     )
-            if args.model == "CMUNeXt_HSPM_APBR":
+            if args.model in APBR_MODELS:
                 for stage_name in ("half", "full"):
-                    logging.info(
-                        "APBR %s diagnostics: route_scale=%.4f - raw_gate_mean=%.6f"
-                        " - active_gate_mean=%.6f - raw_gate>0.5=%.6f - raw_gate>0.8=%.6f"
-                        " - feature_scale=%.6f - logit_scale=%.6f",
-                        stage_name,
-                        avg_meters[f"apbr_{stage_name}_route_scale"].avg,
-                        avg_meters[f"apbr_{stage_name}_raw_gate_mean"].avg,
-                        avg_meters[f"apbr_{stage_name}_active_gate_mean"].avg,
-                        avg_meters[f"apbr_{stage_name}_raw_gate_over_05"].avg,
-                        avg_meters[f"apbr_{stage_name}_raw_gate_over_08"].avg,
-                        avg_meters[f"apbr_{stage_name}_effective_feature_scale"].avg,
-                        avg_meters[f"apbr_{stage_name}_effective_logit_scale"].avg,
-                    )
+                    if args.model == "CMUNeXt_HSPM_APBR_V2":
+                        logging.info(
+                            "APBR-v2 %s diagnostics: route_scale=%.4f - raw_gate_mean=%.6f"
+                            " - active_gate_mean=%.6f - raw_gate>0.5=%.6f - raw_gate>0.8=%.6f"
+                            " - feature_scale=%.6f - correction_mean=%.6f"
+                            " - correction_p99=%.6f - correction_max=%.6f"
+                            " - total_logit_delta_mean=%.6f",
+                            stage_name,
+                            avg_meters[f"apbr_{stage_name}_route_scale"].avg,
+                            avg_meters[f"apbr_{stage_name}_raw_gate_mean"].avg,
+                            avg_meters[f"apbr_{stage_name}_active_gate_mean"].avg,
+                            avg_meters[f"apbr_{stage_name}_raw_gate_over_05"].avg,
+                            avg_meters[f"apbr_{stage_name}_raw_gate_over_08"].avg,
+                            avg_meters[f"apbr_{stage_name}_effective_feature_scale"].avg,
+                            avg_meters[f"apbr_{stage_name}_correction_logit_abs_mean"].avg,
+                            avg_meters[f"apbr_{stage_name}_correction_logit_abs_p99"].avg,
+                            avg_meters[f"apbr_{stage_name}_correction_logit_abs_max"].avg,
+                            avg_meters[f"apbr_{stage_name}_total_logit_delta_abs_mean"].avg,
+                        )
+                    else:
+                        logging.info(
+                            "APBR %s diagnostics: route_scale=%.4f - raw_gate_mean=%.6f"
+                            " - active_gate_mean=%.6f - raw_gate>0.5=%.6f - raw_gate>0.8=%.6f"
+                            " - feature_scale=%.6f - logit_scale=%.6f",
+                            stage_name,
+                            avg_meters[f"apbr_{stage_name}_route_scale"].avg,
+                            avg_meters[f"apbr_{stage_name}_raw_gate_mean"].avg,
+                            avg_meters[f"apbr_{stage_name}_active_gate_mean"].avg,
+                            avg_meters[f"apbr_{stage_name}_raw_gate_over_05"].avg,
+                            avg_meters[f"apbr_{stage_name}_raw_gate_over_08"].avg,
+                            avg_meters[f"apbr_{stage_name}_effective_feature_scale"].avg,
+                            avg_meters[f"apbr_{stage_name}_effective_logit_scale"].avg,
+                        )
                 logging.info(
                     "APBR loss components: train(seg=%.6f - coarse=%.6f - intermediate=%.6f"
                     " - boundary=%.6f - total=%.6f) - val(seg=%.6f - coarse=%.6f"

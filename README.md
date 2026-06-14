@@ -116,6 +116,30 @@ python main.py --model CMUNeXt_HSPM_APBR \
   --use_extra_aug --extra_aug_profile hspm_safe
 ```
 
+`CMUNeXt_HSPM_APBR_V2` is an independent refinement architecture. It routes from
+the current-stage baseline and uses a zero-initialized unbounded logit correction
+head. For a fair first comparison against
+`busi-CMUNeXt_HSPM_APBR-full-coarse01-bounded-3-a`, change only the model name
+and save directory:
+
+```bash
+python main.py --model CMUNeXt_HSPM_APBR_V2 \
+  --base_dir ./data/busi --train_file_dir busi_train3.txt --val_file_dir busi_val3.txt \
+  --save_dir ./checkpoint/6.14/busi-CMUNeXt_HSPM_APBR_V2-full-coarse01-bounded-3-a \
+  --base_lr 0.01 --epoch 300 --batch_size 8 \
+  --hspm_fusion_mode global \
+  --hspm_mixer_mode bounded \
+  --hspm_gamma_init 0.1 \
+  --hspm_gamma_max 0.3 \
+  --apbr_mode full \
+  --apbr_route_warmup_epochs 30 \
+  --apbr_coarse_loss_weight 0.1 \
+  --apbr_coarse_loss_final_weight 0.1 \
+  --apbr_coarse_loss_decay_epochs 0 \
+  --apbr_intermediate_loss_weight 0.15 \
+  --apbr_boundary_loss_weight 0
+```
+
 ## Inference
 
 ```python

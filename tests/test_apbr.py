@@ -62,6 +62,64 @@ class APBRTests(unittest.TestCase):
         self.assertGreaterEqual(gate.min().item(), 0.0)
         self.assertLessEqual(gate.max().item(), 1.0)
 
+    def test_oracle_route_uses_error_confidence_pooling_then_maximum(self):
+        module = AmbiguityProgressiveBoundaryRefinement(channels=8, gate_kernel=3)
+        previous_logits = torch.randn(2, 1, 8, 8, requires_grad=True)
+        oracle_target = torch.randint(0, 2, (2, 1, 16, 16)).float()
+        probability, combined_gate = module.build_route(
+            previous_logits,
+            (16, 16),
+            oracle_target=oracle_target,
+        )
+
+        confidence = 2.0 * torch.abs(probability - 0.5)
+        expected_target = torch.abs(oracle_target - probability) * confidence
+        expected_recovery_gate = torch.nn.functional.max_pool2d(
+            expected_target,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        )
+        ambiguity = 4.0 * probability * (1.0 - probability)
+        expected_ambiguity_gate = torch.nn.functional.max_pool2d(
+            ambiguity,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        )
+        expected_combined_gate = torch.maximum(
+            expected_ambiguity_gate,
+            expected_recovery_gate,
+        )
+
+        self.assertTrue(
+            torch.allclose(module.last_oracle_recovery_target, expected_target)
+        )
+        self.assertTrue(
+            torch.allclose(module.last_oracle_recovery_gate, expected_recovery_gate)
+        )
+        self.assertTrue(torch.allclose(combined_gate, expected_combined_gate))
+        self.assertFalse(combined_gate.requires_grad)
+
+    def test_oracle_target_is_high_for_confident_error_and_low_for_correct(self):
+        module = AmbiguityProgressiveBoundaryRefinement(channels=8, gate_kernel=3)
+        confident_background = torch.full((1, 1, 4, 4), -10.0)
+
+        module.build_route(
+            confident_background,
+            (4, 4),
+            oracle_target=torch.ones(1, 1, 4, 4),
+        )
+        self.assertGreater(module.last_oracle_recovery_target.min().item(), 0.99)
+        self.assertGreater(module.last_oracle_recovery_gate.min().item(), 0.99)
+
+        module.build_route(
+            confident_background,
+            (4, 4),
+            oracle_target=torch.zeros(1, 1, 4, 4),
+        )
+        self.assertLess(module.last_oracle_recovery_target.max().item(), 0.001)
+
     def test_active_gate_applies_route_scale(self):
         module = AmbiguityProgressiveBoundaryRefinement(channels=8, gate_kernel=5)
         module.set_route_scale(0.25)
@@ -92,6 +150,18 @@ class APBRTests(unittest.TestCase):
             self.assertLessEqual(diagnostics[f"{stage}_raw_gate_over_05"].item(), 1.0)
             self.assertGreaterEqual(diagnostics[f"{stage}_raw_gate_over_08"].item(), 0.0)
             self.assertLessEqual(diagnostics[f"{stage}_raw_gate_over_08"].item(), 1.0)
+            for diagnostic_name in (
+                "ambiguity_gate_mean",
+                "oracle_recovery_target_mean",
+                "oracle_recovery_gate_mean",
+                "combined_gate_mean",
+                "recovery_added_mean",
+                "recovery_dominant_ratio",
+            ):
+                value = diagnostics[f"{stage}_{diagnostic_name}"]
+                self.assertTrue(torch.isfinite(value))
+                self.assertGreaterEqual(value.item(), 0.0)
+                self.assertLessEqual(value.item(), 1.0)
 
     def test_no_ambiguity_uses_full_gate(self):
         module = AmbiguityProgressiveBoundaryRefinement(
@@ -150,6 +220,44 @@ class APBRTests(unittest.TestCase):
         outputs["seg"].mean().backward()
         self.assertIsNone(model.prototype_mixer.coarse_head.weight.grad)
         self.assertIsNone(model.prototype_mixer.coarse_head.bias.grad)
+
+    def test_oracle_forward_keeps_standard_forward_and_state_dict_compatible(self):
+        model = self._small_model().eval()
+        x = torch.randn(2, 3, 32, 32)
+        target = torch.randint(0, 2, (2, 1, 32, 32)).float()
+        state_keys = set(model.state_dict())
+        with torch.no_grad():
+            baseline_before = model(x)
+            model.forward_oracle_recovery(x, target)
+            baseline_after = model(x)
+        self.assertEqual(state_keys, set(model.state_dict()))
+        for output_name in baseline_before:
+            self.assertTrue(
+                torch.equal(baseline_before[output_name], baseline_after[output_name])
+            )
+
+    def test_oracle_forward_selects_only_requested_stages(self):
+        model = self._small_model().eval()
+        x = torch.randn(2, 3, 32, 32)
+        target = torch.randint(0, 2, (2, 1, 32, 32)).float()
+        with torch.no_grad():
+            model.forward_oracle_recovery(x, target, oracle_stages={"half"})
+        self.assertGreater(model.apbr_half.last_oracle_recovery_target.mean().item(), 0.0)
+        self.assertEqual(model.apbr_full.last_oracle_recovery_target.sum().item(), 0.0)
+
+        with torch.no_grad():
+            model.forward_oracle_recovery(x, target, oracle_stages={"full"})
+        self.assertEqual(model.apbr_half.last_oracle_recovery_target.sum().item(), 0.0)
+        self.assertGreater(model.apbr_full.last_oracle_recovery_target.mean().item(), 0.0)
+
+    def test_oracle_forward_rejects_invalid_stage(self):
+        model = self._small_model().eval()
+        with self.assertRaises(ValueError):
+            model.forward_oracle_recovery(
+                torch.randn(2, 3, 32, 32),
+                torch.zeros(2, 1, 32, 32),
+                oracle_stages={"quarter"},
+            )
 
     def test_coarse_weight_schedule(self):
         args = Namespace(

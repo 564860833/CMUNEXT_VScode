@@ -16,6 +16,7 @@ from src.network.conv_based.CMUNet import CMUNet
 from src.network.conv_based.CMUNeXt import cmunext
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
 from src.network.conv_based.CMUNeXt_HSPM_APBR import cmunext_hspm_apbr
+from src.network.conv_based.CMUNeXt_HSPM_APBR_V2 import cmunext_hspm_apbr_v2
 from src.network.conv_based.CMUNeXt_HSPM_UBRD import cmunext_hspm_ubrd
 from src.network.conv_based.CMUNeXt_BA_DualGAG import cmunext_ba_dualgag
 from src.network.conv_based.CMUNeXt_BA_DualGAG_SpeckleEnhance import cmunext_ba_dualgag_speckleenhance
@@ -29,6 +30,10 @@ from src.network.conv_based.UNetplus import ResNet34UnetPlus
 from src.network.conv_based.UNeXt import UNext
 from src.network.hybrid_based.Mobile_U_ViT import mobileuvit
 from src.network.transfomer_based.transformer_based_network import get_transformer_based_model
+
+
+APBR_MODELS = {"CMUNeXt_HSPM_APBR", "CMUNeXt_HSPM_APBR_V2"}
+HSPM_MODELS = {"CMUNeXt_HSPM", *APBR_MODELS}
 
 
 def parse_gag_stages(value):
@@ -116,6 +121,22 @@ def build_model(args, parser):
             hspm_small_area_temperature=args.hspm_small_area_temperature,
             apbr_mode=args.apbr_mode,
         )
+    elif args.model == "CMUNeXt_HSPM_APBR_V2":
+        model = cmunext_hspm_apbr_v2(
+            num_classes=args.num_classes,
+            hspm_mode=args.hspm_mode,
+            hspm_mixer_mode=args.hspm_mixer_mode,
+            hspm_gamma_init=args.hspm_gamma_init,
+            hspm_gamma_max=args.hspm_gamma_max,
+            hspm_temperature=args.hspm_temperature,
+            hspm_prototype_dropout=args.hspm_prototype_dropout,
+            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
+            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
+            hspm_fusion_mode=args.hspm_fusion_mode,
+            hspm_small_area_threshold=args.hspm_small_area_threshold,
+            hspm_small_area_temperature=args.hspm_small_area_temperature,
+            apbr_mode=args.apbr_mode,
+        )
     elif args.model == "CMUNeXt_HSPM_UBRD":
         model = cmunext_hspm_ubrd(
             num_classes=args.num_classes,
@@ -182,7 +203,7 @@ def load_model(model_path, args, device, parser):
     model = build_model(args, parser)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
-    if args.model in {"CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR"}:
+    if args.model in HSPM_MODELS:
         effective_fusion_gate = model.effective_fusion_gate()
         if effective_fusion_gate is not None:
             print(f"HSPM effective fusion gate: {effective_fusion_gate.detach().cpu().item():.4f}")
@@ -430,7 +451,7 @@ def validate(model, val_loader, criterion, device, args, save_dir="validation_re
             img_batch, label_batch = img_batch.to(device), label_batch.to(device)
             outputs = forward_with_model(model, args.model, img_batch)
             seg_logits = get_seg_logits(outputs)
-            if args.model in {"CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR", "CMUNeXt_HSPM_UBRD"}:
+            if args.model in {*HSPM_MODELS, "CMUNeXt_HSPM_UBRD"}:
                 loss = criterion(outputs, label_batch)
             else:
                 loss = criterion(seg_logits, label_batch)
@@ -522,7 +543,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Validation script for medical image segmentation")
 
     model_choices = [
-        "CMUNet", "CMUNeXt", "CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR", "CMUNeXt_HSPM_UBRD",
+        "CMUNet", "CMUNeXt", "CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR",
+        "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_UBRD",
         "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
         "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
         "CMUNeXt_BA_DualGAG_SpeckleEnhance",
@@ -597,7 +619,7 @@ if __name__ == "__main__":
                         help="Optional final-prediction boundary loss weight for CMUNeXt_HSPM_UBRD")
     parser.add_argument("--apbr_mode", type=str, default="full",
                         choices=["full", "no_ambiguity", "no_detail"],
-                        help="APBR ablation mode for CMUNeXt_HSPM_APBR")
+                        help="APBR ablation mode for CMUNeXt_HSPM_APBR and CMUNeXt_HSPM_APBR_V2")
     parser.add_argument("--apbr_route_warmup_epochs", type=int, default=30,
                         help="Training-only compatibility option; inference uses full APBR routing")
     parser.add_argument("--apbr_coarse_loss_weight", type=float, default=0.1,
@@ -628,7 +650,7 @@ if __name__ == "__main__":
                         help="Case name to visualize when visual_mode=selected")
     args = parser.parse_args()
 
-    if args.model == "CMUNeXt_HSPM_APBR":
+    if args.model in APBR_MODELS:
         args.hspm_backbone_mode = "dual_path"
     if args.visual_mode == "selected" and not args.visual_case:
         parser.error("--visual_case is required when --visual_mode selected")
@@ -650,7 +672,7 @@ if __name__ == "__main__":
     )
     val_loader = DataLoader(db_val, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
-    if args.model == "CMUNeXt_HSPM_APBR":
+    if args.model in APBR_MODELS:
         criterion = losses.__dict__["APBRLoss"](
             coarse_weight=args.apbr_coarse_loss_weight,
             intermediate_weight=args.apbr_intermediate_loss_weight,
