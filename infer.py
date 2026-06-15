@@ -18,6 +18,7 @@ from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
 from src.network.conv_based.CMUNeXt_HSPM_APBR import cmunext_hspm_apbr
 from src.network.conv_based.CMUNeXt_HSPM_APBR_V2 import cmunext_hspm_apbr_v2
 from src.network.conv_based.CMUNeXt_HSPM_SDFR import cmunext_hspm_sdfr
+from src.network.conv_based.CMUNeXt_HSPM_SDFR_V2 import cmunext_hspm_sdfr_v2
 from src.network.conv_based.CMUNeXt_HSPM_UBRD import cmunext_hspm_ubrd
 from src.network.conv_based.CMUNeXt_BA_DualGAG import cmunext_ba_dualgag
 from src.network.conv_based.CMUNeXt_BA_DualGAG_SpeckleEnhance import cmunext_ba_dualgag_speckleenhance
@@ -34,7 +35,8 @@ from src.network.transfomer_based.transformer_based_network import get_transform
 
 
 APBR_MODELS = {"CMUNeXt_HSPM_APBR", "CMUNeXt_HSPM_APBR_V2"}
-SDFR_MODELS = {"CMUNeXt_HSPM_SDFR"}
+SDFR_V2_MODELS = {"CMUNeXt_HSPM_SDFR_V2"}
+SDFR_MODELS = {"CMUNeXt_HSPM_SDFR", *SDFR_V2_MODELS}
 HSPM_MODELS = {"CMUNeXt_HSPM", *APBR_MODELS, *SDFR_MODELS}
 
 
@@ -156,6 +158,24 @@ def build_model(args, parser):
             sdfr_boundary_temperature=args.sdfr_boundary_temperature,
             sdfr_refine_scale_init=args.sdfr_refine_scale_init,
             sdfr_refine_scale_max=args.sdfr_refine_scale_max,
+        )
+    elif args.model == "CMUNeXt_HSPM_SDFR_V2":
+        model = cmunext_hspm_sdfr_v2(
+            num_classes=args.num_classes,
+            hspm_mode=args.hspm_mode,
+            hspm_mixer_mode=args.hspm_mixer_mode,
+            hspm_gamma_init=args.hspm_gamma_init,
+            hspm_gamma_max=args.hspm_gamma_max,
+            hspm_temperature=args.hspm_temperature,
+            hspm_prototype_dropout=args.hspm_prototype_dropout,
+            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
+            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
+            hspm_fusion_mode=args.hspm_fusion_mode,
+            hspm_small_area_threshold=args.hspm_small_area_threshold,
+            hspm_small_area_temperature=args.hspm_small_area_temperature,
+            sdfr_boundary_temperature=args.sdfr_boundary_temperature,
+            sdfr_v2_correction_scale_init=args.sdfr_v2_correction_scale_init,
+            sdfr_v2_correction_scale_max=args.sdfr_v2_correction_scale_max,
         )
     elif args.model == "CMUNeXt_HSPM_UBRD":
         model = cmunext_hspm_ubrd(
@@ -570,7 +590,8 @@ if __name__ == "__main__":
 
     model_choices = [
         "CMUNet", "CMUNeXt", "CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR",
-        "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_SDFR", "CMUNeXt_HSPM_UBRD",
+        "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_SDFR", "CMUNeXt_HSPM_SDFR_V2",
+        "CMUNeXt_HSPM_UBRD",
         "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
         "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
         "CMUNeXt_BA_DualGAG_SpeckleEnhance",
@@ -676,6 +697,16 @@ if __name__ == "__main__":
                         help="Initial effective SDF refinement residual scale")
     parser.add_argument("--sdfr_refine_scale_max", type=float, default=0.3,
                         help="Maximum effective SDF refinement residual scale")
+    parser.add_argument("--sdfr_v2_base_loss_weight", type=float, default=0.2,
+                        help="Base-logit segmentation loss weight for SDFR V2")
+    parser.add_argument("--sdfr_v2_band_width", type=float, default=0.2,
+                        help="Normalized target SDF width supervised by SDFR V2")
+    parser.add_argument("--sdfr_v2_band_loss_weight", type=float, default=0.1,
+                        help="Boundary-band BCE weight for SDFR V2")
+    parser.add_argument("--sdfr_v2_correction_scale_init", type=float, default=1.0,
+                        help="Initial effective bounded logit-correction scale for SDFR V2")
+    parser.add_argument("--sdfr_v2_correction_scale_max", type=float, default=3.0,
+                        help="Maximum effective bounded logit-correction scale for SDFR V2")
     parser.add_argument("--val_threshold_mode", type=str, default="fixed", choices=["fixed", "scan"],
                         help="Use a fixed validation threshold or scan a threshold range")
     parser.add_argument("--val_threshold", type=float, default=0.5,
@@ -718,7 +749,17 @@ if __name__ == "__main__":
     )
     val_loader = DataLoader(db_val, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
-    if args.model in SDFR_MODELS:
+    if args.model in SDFR_V2_MODELS:
+        criterion = losses.__dict__["SDFRV2Loss"](
+            coarse_weight=args.hspm_coarse_loss_weight,
+            sdf_weight=args.sdfr_sdf_loss_weight,
+            boundary_temperature=args.sdfr_boundary_temperature,
+            boundary_emphasis=args.sdfr_boundary_emphasis,
+            base_weight=args.sdfr_v2_base_loss_weight,
+            band_width=args.sdfr_v2_band_width,
+            band_weight=args.sdfr_v2_band_loss_weight,
+        ).to(device)
+    elif args.model in SDFR_MODELS:
         criterion = losses.__dict__["SDFRLoss"](
             coarse_weight=args.hspm_coarse_loss_weight,
             sdf_weight=args.sdfr_sdf_loss_weight,

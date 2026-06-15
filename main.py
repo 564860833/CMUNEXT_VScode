@@ -33,6 +33,7 @@ from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
 from src.network.conv_based.CMUNeXt_HSPM_APBR import cmunext_hspm_apbr
 from src.network.conv_based.CMUNeXt_HSPM_APBR_V2 import cmunext_hspm_apbr_v2
 from src.network.conv_based.CMUNeXt_HSPM_SDFR import cmunext_hspm_sdfr
+from src.network.conv_based.CMUNeXt_HSPM_SDFR_V2 import cmunext_hspm_sdfr_v2
 from src.network.conv_based.CMUNeXt_HSPM_UBRD import cmunext_hspm_ubrd
 from src.network.conv_based.CMUNeXt_BA_DualGAG import cmunext_ba_dualgag
 from src.network.conv_based.CMUNeXt_BA_DualGAG_SpeckleEnhance import cmunext_ba_dualgag_speckleenhance
@@ -49,7 +50,8 @@ from src.network.hybrid_based.Mobile_U_ViT import mobileuvit, mobileuvit_l
 
 
 APBR_MODELS = {"CMUNeXt_HSPM_APBR", "CMUNeXt_HSPM_APBR_V2"}
-SDFR_MODELS = {"CMUNeXt_HSPM_SDFR"}
+SDFR_V2_MODELS = {"CMUNeXt_HSPM_SDFR_V2"}
+SDFR_MODELS = {"CMUNeXt_HSPM_SDFR", *SDFR_V2_MODELS}
 HSPM_MODELS = {"CMUNeXt_HSPM", *APBR_MODELS, *SDFR_MODELS}
 
 
@@ -114,7 +116,8 @@ def parse_gag_stages(value):
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default="CMUNeXt",
                     choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR",
-                             "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_SDFR", "CMUNeXt_HSPM_UBRD",
+                             "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_SDFR",
+                             "CMUNeXt_HSPM_SDFR_V2", "CMUNeXt_HSPM_UBRD",
                              "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
                              "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
                              "CMUNeXt_BA_DualGAG_SpeckleEnhance",
@@ -223,6 +226,16 @@ parser.add_argument('--sdfr_refine_scale_init', type=float, default=0.05,
                     help='Initial effective SDF refinement residual scale')
 parser.add_argument('--sdfr_refine_scale_max', type=float, default=0.3,
                     help='Maximum effective SDF refinement residual scale')
+parser.add_argument('--sdfr_v2_base_loss_weight', type=float, default=0.2,
+                    help='Base-logit segmentation loss weight for SDFR V2')
+parser.add_argument('--sdfr_v2_band_width', type=float, default=0.2,
+                    help='Normalized target SDF width supervised by the SDFR V2 boundary-band loss')
+parser.add_argument('--sdfr_v2_band_loss_weight', type=float, default=0.1,
+                    help='Maximum boundary-band BCE weight for SDFR V2')
+parser.add_argument('--sdfr_v2_correction_scale_init', type=float, default=1.0,
+                    help='Initial effective bounded logit-correction scale for SDFR V2')
+parser.add_argument('--sdfr_v2_correction_scale_max', type=float, default=3.0,
+                    help='Maximum effective bounded logit-correction scale for SDFR V2')
 parser.add_argument('--val_threshold_mode', type=str, default="fixed", choices=["fixed", "scan"],
                     help='Use a fixed validation threshold or scan a threshold range')
 parser.add_argument('--val_threshold', type=float, default=0.5,
@@ -312,6 +325,24 @@ def get_model(args):
             sdfr_refine_scale_init=args.sdfr_refine_scale_init,
             sdfr_refine_scale_max=args.sdfr_refine_scale_max,
         ).cuda()
+    elif args.model == "CMUNeXt_HSPM_SDFR_V2":
+        model = cmunext_hspm_sdfr_v2(
+            num_classes=args.num_classes,
+            hspm_mode=args.hspm_mode,
+            hspm_mixer_mode=args.hspm_mixer_mode,
+            hspm_gamma_init=args.hspm_gamma_init,
+            hspm_gamma_max=args.hspm_gamma_max,
+            hspm_temperature=args.hspm_temperature,
+            hspm_prototype_dropout=args.hspm_prototype_dropout,
+            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
+            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
+            hspm_fusion_mode=args.hspm_fusion_mode,
+            hspm_small_area_threshold=args.hspm_small_area_threshold,
+            hspm_small_area_temperature=args.hspm_small_area_temperature,
+            sdfr_boundary_temperature=args.sdfr_boundary_temperature,
+            sdfr_v2_correction_scale_init=args.sdfr_v2_correction_scale_init,
+            sdfr_v2_correction_scale_max=args.sdfr_v2_correction_scale_max,
+        ).cuda()
     elif args.model == "CMUNeXt_HSPM_UBRD":
         model = cmunext_hspm_ubrd(
             num_classes=args.num_classes,
@@ -369,6 +400,16 @@ def get_model(args):
 
 
 def get_criterion(args):
+    if args.model in SDFR_V2_MODELS:
+        return losses.__dict__['SDFRV2Loss'](
+            coarse_weight=args.hspm_coarse_loss_weight,
+            sdf_weight=args.sdfr_sdf_loss_weight,
+            boundary_temperature=args.sdfr_boundary_temperature,
+            boundary_emphasis=args.sdfr_boundary_emphasis,
+            base_weight=args.sdfr_v2_base_loss_weight,
+            band_width=args.sdfr_v2_band_width,
+            band_weight=args.sdfr_v2_band_loss_weight,
+        ).cuda()
     if args.model in SDFR_MODELS:
         return losses.__dict__['SDFRLoss'](
             coarse_weight=args.hspm_coarse_loss_weight,
@@ -451,10 +492,21 @@ def compute_loss(
     sampled_batch=None,
     aux_weight=None,
     sdf_weight=None,
+    band_weight=None,
 ):
     if args.model in SDFR_MODELS:
         if sampled_batch is None or "sdf" not in sampled_batch:
-            raise KeyError("CMUNeXt_HSPM_SDFR requires sampled_batch['sdf'].")
+            raise KeyError("SDFR models require sampled_batch['sdf'].")
+        if args.model in SDFR_V2_MODELS:
+            return criterion(
+                outputs,
+                label_batch,
+                sampled_batch["sdf"].to(label_batch.device),
+                coarse_weight=aux_weight,
+                sdf_weight=sdf_weight,
+                band_weight=band_weight,
+                return_components=True,
+            )
         return criterion(
             outputs,
             label_batch,
@@ -522,6 +574,13 @@ def get_sdfr_refine_schedule_scale(args, epoch_num):
     if warmup_epochs <= 0:
         return 1.0
     return min(max(float(epoch_num - start_epoch) / warmup_epochs, 0.0), 1.0)
+
+
+def get_sdfr_v2_band_weight(args, epoch_num):
+    return (
+        float(args.sdfr_v2_band_loss_weight)
+        * get_sdfr_refine_schedule_scale(args, epoch_num)
+    )
 
 
 def get_hspm_prototype_scale(args, epoch_num):
@@ -711,6 +770,14 @@ def main(args):
         raise ValueError("SDFR truncation ratio and boundary temperature must be positive.")
     if not 0.0 < args.sdfr_refine_scale_init < args.sdfr_refine_scale_max:
         raise ValueError("SDFR refine scale init must be in (0, refine scale max).")
+    if args.sdfr_v2_base_loss_weight < 0 or args.sdfr_v2_band_loss_weight < 0:
+        raise ValueError("SDFR V2 loss weights must be non-negative.")
+    if not 0.0 < args.sdfr_v2_band_width <= 1.0:
+        raise ValueError("SDFR V2 band width must be in (0, 1].")
+    if not 0.0 < args.sdfr_v2_correction_scale_init < args.sdfr_v2_correction_scale_max:
+        raise ValueError(
+            "SDFR V2 correction scale init must be in (0, correction scale max)."
+        )
     if args.early_stop_patience < 0 or args.early_stop_min_delta < 0:
         raise ValueError("Early stopping settings must be non-negative.")
 
@@ -774,6 +841,11 @@ def main(args):
             if args.model in SDFR_MODELS
             else 0.0
         )
+        current_sdfr_v2_band_weight = (
+            get_sdfr_v2_band_weight(args, epoch_num)
+            if args.model in SDFR_V2_MODELS
+            else 0.0
+        )
         model.train()
         avg_meters = {'loss': AverageMeter(),
                       'iou': AverageMeter(),
@@ -826,22 +898,39 @@ def main(args):
                 ):
                     avg_meters[f"apbr_{stage_name}_{diagnostic_name}"] = AverageMeter()
         if args.model in SDFR_MODELS:
+            component_names = [
+                "seg",
+                "coarse_weighted",
+                "sdf_weighted",
+                "total",
+            ]
+            if args.model in SDFR_V2_MODELS:
+                component_names.extend(["base_weighted", "band_weighted"])
             for prefix in ("train", "val"):
-                for component_name in (
-                    "seg",
-                    "coarse_weighted",
-                    "sdf_weighted",
-                    "total",
-                ):
+                for component_name in component_names:
                     avg_meters[f"{prefix}_loss_{component_name}"] = AverageMeter()
-            for diagnostic_name in (
-                "schedule_scale",
-                "effective_refine_scale",
-                "boundary_gate_mean",
-                "boundary_gate_over_05",
-                "sdf_abs_mean",
-                "residual_abs_mean",
-            ):
+            if args.model in SDFR_V2_MODELS:
+                diagnostic_names = (
+                    "schedule_scale",
+                    "effective_correction_scale",
+                    "boundary_gate_mean",
+                    "boundary_gate_over_05",
+                    "sdf_abs_mean",
+                    "raw_correction_abs_mean",
+                    "logit_correction_abs_mean",
+                    "logit_correction_abs_max",
+                    "prediction_flip_ratio",
+                )
+            else:
+                diagnostic_names = (
+                    "schedule_scale",
+                    "effective_refine_scale",
+                    "boundary_gate_mean",
+                    "boundary_gate_over_05",
+                    "sdf_abs_mean",
+                    "residual_abs_mean",
+                )
+            for diagnostic_name in diagnostic_names:
                 avg_meters[f"sdfr_{diagnostic_name}"] = AverageMeter()
 
         # (您修改的部分)
@@ -862,6 +951,7 @@ def main(args):
                 sampled_batch,
                 aux_weight=current_coarse_weight,
                 sdf_weight=current_sdfr_sdf_weight,
+                band_weight=current_sdfr_v2_band_weight,
             )
             loss = get_loss_tensor(loss_output)
             update_loss_component_meters(
@@ -947,6 +1037,7 @@ def main(args):
                     sampled_batch,
                     aux_weight=current_coarse_weight,
                     sdf_weight=current_sdfr_sdf_weight,
+                    band_weight=current_sdfr_v2_band_weight,
                 )
                 loss = get_loss_tensor(loss_output)
                 update_loss_component_meters(
@@ -1109,34 +1200,75 @@ def main(args):
                     avg_meters["val_loss_total"].avg,
                 )
             if args.model in SDFR_MODELS:
-                logging.info(
-                    "SDFR schedule: sdf_weight=%.4f - refine_schedule_scale=%.4f"
-                    " - effective_refine_scale=%.6f",
-                    current_sdfr_sdf_weight,
-                    avg_meters["sdfr_schedule_scale"].avg,
-                    avg_meters["sdfr_effective_refine_scale"].avg,
-                )
-                logging.info(
-                    "SDFR diagnostics: boundary_gate_mean=%.6f - boundary_gate>0.5=%.6f"
-                    " - sdf_abs_mean=%.6f - residual_abs_mean=%.6f",
-                    avg_meters["sdfr_boundary_gate_mean"].avg,
-                    avg_meters["sdfr_boundary_gate_over_05"].avg,
-                    avg_meters["sdfr_sdf_abs_mean"].avg,
-                    avg_meters["sdfr_residual_abs_mean"].avg,
-                )
-                logging.info(
-                    "SDFR loss components: train(seg=%.6f - coarse=%.6f - sdf=%.6f"
-                    " - total=%.6f) - val(seg=%.6f - coarse=%.6f - sdf=%.6f"
-                    " - total=%.6f)",
-                    avg_meters["train_loss_seg"].avg,
-                    avg_meters["train_loss_coarse_weighted"].avg,
-                    avg_meters["train_loss_sdf_weighted"].avg,
-                    avg_meters["train_loss_total"].avg,
-                    avg_meters["val_loss_seg"].avg,
-                    avg_meters["val_loss_coarse_weighted"].avg,
-                    avg_meters["val_loss_sdf_weighted"].avg,
-                    avg_meters["val_loss_total"].avg,
-                )
+                if args.model in SDFR_V2_MODELS:
+                    logging.info(
+                        "SDFR-v2 schedule: sdf_weight=%.4f - band_weight=%.4f"
+                        " - correction_schedule_scale=%.4f - effective_correction_scale=%.6f",
+                        current_sdfr_sdf_weight,
+                        current_sdfr_v2_band_weight,
+                        avg_meters["sdfr_schedule_scale"].avg,
+                        avg_meters["sdfr_effective_correction_scale"].avg,
+                    )
+                    logging.info(
+                        "SDFR-v2 diagnostics: boundary_gate_mean=%.6f - boundary_gate>0.5=%.6f"
+                        " - sdf_abs_mean=%.6f - raw_correction_mean=%.6f"
+                        " - logit_correction_mean=%.6f - logit_correction_max=%.6f"
+                        " - prediction_flip_ratio=%.6f",
+                        avg_meters["sdfr_boundary_gate_mean"].avg,
+                        avg_meters["sdfr_boundary_gate_over_05"].avg,
+                        avg_meters["sdfr_sdf_abs_mean"].avg,
+                        avg_meters["sdfr_raw_correction_abs_mean"].avg,
+                        avg_meters["sdfr_logit_correction_abs_mean"].avg,
+                        avg_meters["sdfr_logit_correction_abs_max"].avg,
+                        avg_meters["sdfr_prediction_flip_ratio"].avg,
+                    )
+                    logging.info(
+                        "SDFR-v2 loss components: train(seg=%.6f - base=%.6f - coarse=%.6f"
+                        " - sdf=%.6f - band=%.6f - total=%.6f)"
+                        " - val(seg=%.6f - base=%.6f - coarse=%.6f - sdf=%.6f"
+                        " - band=%.6f - total=%.6f)",
+                        avg_meters["train_loss_seg"].avg,
+                        avg_meters["train_loss_base_weighted"].avg,
+                        avg_meters["train_loss_coarse_weighted"].avg,
+                        avg_meters["train_loss_sdf_weighted"].avg,
+                        avg_meters["train_loss_band_weighted"].avg,
+                        avg_meters["train_loss_total"].avg,
+                        avg_meters["val_loss_seg"].avg,
+                        avg_meters["val_loss_base_weighted"].avg,
+                        avg_meters["val_loss_coarse_weighted"].avg,
+                        avg_meters["val_loss_sdf_weighted"].avg,
+                        avg_meters["val_loss_band_weighted"].avg,
+                        avg_meters["val_loss_total"].avg,
+                    )
+                else:
+                    logging.info(
+                        "SDFR schedule: sdf_weight=%.4f - refine_schedule_scale=%.4f"
+                        " - effective_refine_scale=%.6f",
+                        current_sdfr_sdf_weight,
+                        avg_meters["sdfr_schedule_scale"].avg,
+                        avg_meters["sdfr_effective_refine_scale"].avg,
+                    )
+                    logging.info(
+                        "SDFR diagnostics: boundary_gate_mean=%.6f - boundary_gate>0.5=%.6f"
+                        " - sdf_abs_mean=%.6f - residual_abs_mean=%.6f",
+                        avg_meters["sdfr_boundary_gate_mean"].avg,
+                        avg_meters["sdfr_boundary_gate_over_05"].avg,
+                        avg_meters["sdfr_sdf_abs_mean"].avg,
+                        avg_meters["sdfr_residual_abs_mean"].avg,
+                    )
+                    logging.info(
+                        "SDFR loss components: train(seg=%.6f - coarse=%.6f - sdf=%.6f"
+                        " - total=%.6f) - val(seg=%.6f - coarse=%.6f - sdf=%.6f"
+                        " - total=%.6f)",
+                        avg_meters["train_loss_seg"].avg,
+                        avg_meters["train_loss_coarse_weighted"].avg,
+                        avg_meters["train_loss_sdf_weighted"].avg,
+                        avg_meters["train_loss_total"].avg,
+                        avg_meters["val_loss_seg"].avg,
+                        avg_meters["val_loss_coarse_weighted"].avg,
+                        avg_meters["val_loss_sdf_weighted"].avg,
+                        avg_meters["val_loss_total"].avg,
+                    )
         if args.val_threshold_mode == "scan":
             logging.info(
                 'epoch [%d/%d] (Total time: %s)  train_loss : %.4f, train_iou: %.4f - val_loss %.4f - val_thr %.4f - '

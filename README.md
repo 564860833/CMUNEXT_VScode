@@ -164,6 +164,27 @@ For SDF-only ablations, keep refinement disabled with
 `--sdfr_refine_start_epoch 300`. Use `--sdfr_sdf_warmup_epochs 0` for fixed
 SDF weighting, or `--sdfr_boundary_emphasis 0` to remove boundary weighting.
 
+`CMUNeXt_HSPM_SDFR_V2` keeps the same SDF supervision but replaces feature
+refinement with delayed, boundary-gated logit correction. Its boundary-band
+loss follows the same epoch 10-40 correction warmup:
+
+```bash
+python main.py --model CMUNeXt_HSPM_SDFR_V2 \
+  --base_dir ./data/busi --train_file_dir busi_train3.txt --val_file_dir busi_val3.txt \
+  --save_dir ./checkpoint/6.15/busi-CMUNeXt_HSPM_SDFR_V2-full-3-a \
+  --base_lr 0.01 --epoch 300 --batch_size 8 \
+  --hspm_fusion_mode global --hspm_mixer_mode legacy \
+  --hspm_coarse_loss_weight 0.1 --hspm_coarse_loss_final_weight 0.02 \
+  --hspm_coarse_loss_decay_epochs 150 \
+  --sdfr_sdf_loss_weight 0.2 --sdfr_sdf_warmup_epochs 10 \
+  --sdfr_refine_start_epoch 10 --sdfr_refine_warmup_epochs 30 \
+  --sdfr_truncation_ratio 0.08 --sdfr_boundary_temperature 0.2 \
+  --sdfr_boundary_emphasis 4.0 \
+  --sdfr_v2_base_loss_weight 0.2 --sdfr_v2_band_width 0.2 \
+  --sdfr_v2_band_loss_weight 0.1 \
+  --sdfr_v2_correction_scale_init 1.0 --sdfr_v2_correction_scale_max 3.0
+```
+
 ## Inference
 
 ```python
