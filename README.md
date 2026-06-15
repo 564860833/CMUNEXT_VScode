@@ -170,6 +170,43 @@ python infer.py --model CMUNeXt_USLGSF_V2 \
 
 V1 checkpoints are not migrated to V2; train V2 from a fresh initialization.
 
+### Dynamic structure-relevance US-LGSF V3
+
+`CMUNeXt_USLGSF_V3` dynamically combines multi-scale structural reliability
+with encoder-decoder semantic relevance at the two shallow skip stages. A
+pixel-wise softmax predicts the structure and relevance weights, and an
+identity-safe bounded residual injects the selected local detail without an
+auxiliary coarse head or uncertainty route:
+
+```bash
+python main.py --model CMUNeXt_USLGSF_V3 \
+  --base_dir ./data/busi --train_file_dir busi_train3.txt --val_file_dir busi_val3.txt \
+  --save_dir ./checkpoint/busi-CMUNeXt_USLGSF_V3-full-3-a \
+  --base_lr 0.01 --epoch 300 --batch_size 8 \
+  --uslgsf_stages 0,1 \
+  --uslgsf_smooth_kernels 3,7 \
+  --uslgsf_context_downsample 2 \
+  --uslgsf_alpha_init 0.05 --uslgsf_alpha_max 0.5 \
+  --uslgsf_mode full \
+  --uslgsf_residual_init_scale 0.05
+```
+
+Validate a V3 checkpoint with full residual routing:
+
+```bash
+python infer.py --model CMUNeXt_USLGSF_V3 \
+  --model_path ./checkpoint/busi-CMUNeXt_USLGSF_V3-full-3-a/CMUNeXt_USLGSF_V3_model.pth \
+  --base_dir ./data/busi --train_file_dir busi_train3.txt --val_file_dir busi_val3.txt \
+  --uslgsf_stages 0,1 --uslgsf_context_downsample 2 \
+  --uslgsf_mode full --uslgsf_residual_init_scale 0.05
+```
+
+V3 supports `full`, `context_only`, `structure_only`, and `relevance_only`.
+Use `model.set_uslgsf_route_scale(0)` for a strict no-injection ablation.
+V3 supports only stages `0` and `1` and uses the standard `BCEDiceLoss` and
+optimizer settings. It must be trained from a fresh initialization; previous
+V3 checkpoints are incompatible, while V1 and V2 checkpoints remain unchanged.
+
 For the first APBR structure-validation run, keep the strongest HSPM settings fixed,
 warm up APBR routing, and disable boundary loss and coarse-loss decay:
 

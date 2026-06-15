@@ -31,6 +31,7 @@ from src.network.conv_based.UNet3plus import UNet3plus
 from src.network.conv_based.CMUNeXt import cmunext
 from src.network.conv_based.CMUNeXt_USLGSF import cmunext_uslgsf
 from src.network.conv_based.CMUNeXt_USLGSF_V2 import cmunext_uslgsf_v2
+from src.network.conv_based.CMUNeXt_USLGSF_V3 import cmunext_uslgsf_v3
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
 from src.network.conv_based.CMUNeXt_HSPM_APBR import cmunext_hspm_apbr
 from src.network.conv_based.CMUNeXt_HSPM_APBR_V2 import cmunext_hspm_apbr_v2
@@ -55,6 +56,18 @@ APBR_MODELS = {"CMUNeXt_HSPM_APBR", "CMUNeXt_HSPM_APBR_V2"}
 SDFR_V2_MODELS = {"CMUNeXt_HSPM_SDFR_V2"}
 SDFR_MODELS = {"CMUNeXt_HSPM_SDFR", *SDFR_V2_MODELS}
 HSPM_MODELS = {"CMUNeXt_HSPM", *APBR_MODELS, *SDFR_MODELS}
+USLGSF_V3_MODELS = {"CMUNeXt_USLGSF_V3"}
+USLGSF_V3_DIAGNOSTIC_NAMES = (
+    "structure_reliability_mean",
+    "decoder_relevance_mean",
+    "structure_weight_mean",
+    "relevance_weight_mean",
+    "active_gate_mean",
+    "route_scale",
+    "effective_alpha",
+    "residual_delta_abs_mean",
+    "injection_encoder_rms_ratio",
+)
 DEFAULT_HSPM_DIMS = (16, 32, 128, 160, 256)
 
 
@@ -181,7 +194,7 @@ def parse_gag_stages(value):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default="CMUNeXt",
-                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR",
+                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR",
                              "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_SDFR",
                              "CMUNeXt_HSPM_SDFR_V2", "CMUNeXt_HSPM_UBRD",
                              "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
@@ -227,6 +240,8 @@ parser.add_argument('--uslgsf_alpha_max', type=float, default=0.5,
 parser.add_argument('--uslgsf_mode', type=str, default="full",
                     choices=["full", "context_only", "structure_only", "relevance_only"],
                     help='US-LGSF full model or a core ablation mode')
+parser.add_argument('--uslgsf_residual_init_scale', type=float, default=0.05,
+                    help='Kaiming residual projection initialization scale for CMUNeXt_USLGSF_V3')
 parser.add_argument('--gag_stages', type=parse_gag_stages, default=(2, 3),
                     help='Comma-separated DualGAG stages, e.g. 0,1 or 1,3 or 0,1,2,3')
 parser.add_argument('--boundary_loss_weight', type=float, default=0.3,
@@ -361,6 +376,17 @@ def get_model(args):
             uslgsf_alpha_init=args.uslgsf_alpha_init,
             uslgsf_alpha_max=args.uslgsf_alpha_max,
             uslgsf_mode=args.uslgsf_mode,
+        ).cuda()
+    elif args.model == "CMUNeXt_USLGSF_V3":
+        model = cmunext_uslgsf_v3(
+            num_classes=args.num_classes,
+            uslgsf_stages=args.uslgsf_stages,
+            uslgsf_smooth_kernels=args.uslgsf_smooth_kernels,
+            uslgsf_context_downsample=args.uslgsf_context_downsample,
+            uslgsf_alpha_init=args.uslgsf_alpha_init,
+            uslgsf_alpha_max=args.uslgsf_alpha_max,
+            uslgsf_mode=args.uslgsf_mode,
+            uslgsf_residual_init_scale=args.uslgsf_residual_init_scale,
         ).cuda()
     elif args.model == "CMUNeXt_HSPM":
         model = cmunext_hspm(
@@ -809,6 +835,18 @@ def get_sdfr_diagnostics(model):
     }
 
 
+def get_uslgsf_diagnostics(model):
+    uslgsf_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+    diagnostics = getattr(uslgsf_model, "last_uslgsf_diagnostics", None)
+    if diagnostics is None:
+        return None
+    return {
+        f"{stage}_{name}": float(value.detach().cpu())
+        for stage, stage_diagnostics in diagnostics.items()
+        for name, value in stage_diagnostics.items()
+    }
+
+
 def update_loss_component_meters(avg_meters, components, prefix, batch_size):
     if components is None:
         return
@@ -908,6 +946,9 @@ def main(args):
     if args.model in {*APBR_MODELS, *SDFR_MODELS}:
         args.hspm_backbone_mode = "dual_path"
     validate_augmentation_args(args)
+    if args.model in USLGSF_V3_MODELS:
+        if args.uslgsf_residual_init_scale <= 0:
+            raise ValueError("USLGSF V3 residual initialization scale must be positive.")
     if args.hspm_coarse_loss_weight < 0:
         raise ValueError("hspm_coarse_loss_weight must be non-negative.")
     if args.hspm_coarse_loss_final_weight is not None and args.hspm_coarse_loss_final_weight < 0:
@@ -1090,6 +1131,10 @@ def main(args):
                     "effective_logit_scale",
                 ):
                     avg_meters[f"apbr_{stage_name}_{diagnostic_name}"] = AverageMeter()
+        if args.model in USLGSF_V3_MODELS:
+            for stage in args.uslgsf_stages:
+                for diagnostic_name in USLGSF_V3_DIAGNOSTIC_NAMES:
+                    avg_meters[f"uslgsf_{stage}_{diagnostic_name}"] = AverageMeter()
         if args.model in SDFR_MODELS:
             component_names = [
                 "seg",
@@ -1182,6 +1227,14 @@ def main(args):
                 img_batch, label_batch = img_batch.cuda(), label_batch.cuda()
                 output = forward_with_model(args, model, img_batch)
                 seg_logits = get_seg_logits(output)
+                if args.model in USLGSF_V3_MODELS:
+                    uslgsf_diagnostics = get_uslgsf_diagnostics(model)
+                    if uslgsf_diagnostics is not None:
+                        for diagnostic_name, diagnostic_value in uslgsf_diagnostics.items():
+                            avg_meters[f"uslgsf_{diagnostic_name}"].update(
+                                diagnostic_value,
+                                img_batch.size(0),
+                            )
                 fusion_diagnostics = (
                     get_hspm_fusion_diagnostics(model)
                     if args.model in HSPM_MODELS
@@ -1463,6 +1516,25 @@ def main(args):
                         avg_meters["val_loss_sdf_weighted"].avg,
                         avg_meters["val_loss_total"].avg,
                     )
+        if args.model in USLGSF_V3_MODELS:
+            for stage in args.uslgsf_stages:
+                logging.info(
+                    "USLGSF-v3 stage %s diagnostics: structure=%.6f"
+                    " - relevance=%.6f - structure_weight=%.6f"
+                    " - relevance_weight=%.6f - active_gate=%.6f"
+                    " - route_scale=%.6f - alpha=%.6f - residual_delta=%.6f"
+                    " - injection_encoder_rms_ratio=%.6f",
+                    stage,
+                    avg_meters[f"uslgsf_{stage}_structure_reliability_mean"].avg,
+                    avg_meters[f"uslgsf_{stage}_decoder_relevance_mean"].avg,
+                    avg_meters[f"uslgsf_{stage}_structure_weight_mean"].avg,
+                    avg_meters[f"uslgsf_{stage}_relevance_weight_mean"].avg,
+                    avg_meters[f"uslgsf_{stage}_active_gate_mean"].avg,
+                    avg_meters[f"uslgsf_{stage}_route_scale"].avg,
+                    avg_meters[f"uslgsf_{stage}_effective_alpha"].avg,
+                    avg_meters[f"uslgsf_{stage}_residual_delta_abs_mean"].avg,
+                    avg_meters[f"uslgsf_{stage}_injection_encoder_rms_ratio"].avg,
+                )
         if args.val_threshold_mode == "scan":
             logging.info(
                 'epoch [%d/%d] (Total time: %s)  train_loss : %.4f, train_iou: %.4f - val_loss %.4f - val_thr %.4f - '

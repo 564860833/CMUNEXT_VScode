@@ -16,6 +16,7 @@ from src.network.conv_based.CMUNet import CMUNet
 from src.network.conv_based.CMUNeXt import cmunext
 from src.network.conv_based.CMUNeXt_USLGSF import cmunext_uslgsf
 from src.network.conv_based.CMUNeXt_USLGSF_V2 import cmunext_uslgsf_v2
+from src.network.conv_based.CMUNeXt_USLGSF_V3 import cmunext_uslgsf_v3
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
 from src.network.conv_based.CMUNeXt_HSPM_APBR import cmunext_hspm_apbr
 from src.network.conv_based.CMUNeXt_HSPM_APBR_V2 import cmunext_hspm_apbr_v2
@@ -178,6 +179,17 @@ def build_model(args, parser):
             uslgsf_alpha_init=args.uslgsf_alpha_init,
             uslgsf_alpha_max=args.uslgsf_alpha_max,
             uslgsf_mode=args.uslgsf_mode,
+        )
+    elif args.model == "CMUNeXt_USLGSF_V3":
+        model = cmunext_uslgsf_v3(
+            num_classes=args.num_classes,
+            uslgsf_stages=args.uslgsf_stages,
+            uslgsf_smooth_kernels=args.uslgsf_smooth_kernels,
+            uslgsf_context_downsample=args.uslgsf_context_downsample,
+            uslgsf_alpha_init=args.uslgsf_alpha_init,
+            uslgsf_alpha_max=args.uslgsf_alpha_max,
+            uslgsf_mode=args.uslgsf_mode,
+            uslgsf_residual_init_scale=args.uslgsf_residual_init_scale,
         )
     elif args.model == "CMUNeXt_HSPM":
         model = cmunext_hspm(
@@ -681,7 +693,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Validation script for medical image segmentation")
 
     model_choices = [
-        "CMUNet", "CMUNeXt", "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR",
+        "CMUNet", "CMUNeXt", "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR",
         "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_SDFR", "CMUNeXt_HSPM_SDFR_V2",
         "CMUNeXt_HSPM_UBRD",
         "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
@@ -723,6 +735,8 @@ if __name__ == "__main__":
     parser.add_argument("--uslgsf_mode", type=str, default="full",
                         choices=["full", "context_only", "structure_only", "relevance_only"],
                         help="US-LGSF full model or a core ablation mode")
+    parser.add_argument("--uslgsf_residual_init_scale", type=float, default=0.05,
+                        help="Residual projection initialization scale for CMUNeXt_USLGSF_V3")
     parser.add_argument("--gag_stages", type=parse_gag_stages, default=(2, 3),
                         help="Comma-separated DualGAG stages, e.g. 0,1 or 1,3 or 0,1,2,3")
     parser.add_argument("--boundary_loss_weight", type=float, default=0.3,
