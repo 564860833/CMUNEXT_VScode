@@ -100,6 +100,29 @@ python main.py --model CMUNeXt_HSPM \
   --use_extra_aug --extra_aug_profile hspm_safe
 ```
 
+### US-LGSF skip fusion
+
+`CMUNeXt_USLGSF` replaces selected CMUNeXt skip connections with ultrasound
+local-structure guided skip fusion. The default configuration refines only the
+two shallowest skips, combines multi-scale structural reliability with decoder
+semantic relevance, and keeps the original `BCEDiceLoss`:
+
+```bash
+python main.py --model CMUNeXt_USLGSF \
+  --base_dir ./data/busi --train_file_dir busi_train3.txt --val_file_dir busi_val3.txt \
+  --save_dir ./checkpoint/busi-CMUNeXt_USLGSF-full-3-a \
+  --base_lr 0.01 --epoch 300 --batch_size 8 \
+  --uslgsf_stages 0,1 \
+  --uslgsf_smooth_kernels 3,7 \
+  --uslgsf_context_downsample 2 \
+  --uslgsf_alpha_init 0.05 --uslgsf_alpha_max 0.5 \
+  --uslgsf_mode full
+```
+
+Use `--uslgsf_mode context_only`, `structure_only`, or `relevance_only` for
+core ablations. Stage ablations can be run with `--uslgsf_stages 0` or
+`--uslgsf_stages 0,1,2`.
+
 For the first APBR structure-validation run, keep the strongest HSPM settings fixed,
 warm up APBR routing, and disable boundary loss and coarse-loss decay:
 

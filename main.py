@@ -29,6 +29,7 @@ from src.network.conv_based.UNeXt import UNext
 from src.network.conv_based.UNetplus import ResNet34UnetPlus
 from src.network.conv_based.UNet3plus import UNet3plus
 from src.network.conv_based.CMUNeXt import cmunext
+from src.network.conv_based.CMUNeXt_USLGSF import cmunext_uslgsf
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
 from src.network.conv_based.CMUNeXt_HSPM_APBR import cmunext_hspm_apbr
 from src.network.conv_based.CMUNeXt_HSPM_APBR_V2 import cmunext_hspm_apbr_v2
@@ -90,6 +91,52 @@ def parse_ddsr_stages(value):
     return tuple(stages)
 
 
+def parse_uslgsf_stages(value):
+    if isinstance(value, (tuple, list)):
+        return tuple(value)
+
+    stages = []
+    for item in str(value).split(","):
+        item = item.strip()
+        if not item:
+            raise argparse.ArgumentTypeError("uslgsf_stages must be a comma-separated list, e.g. 0,1.")
+        try:
+            stage = int(item)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                "uslgsf_stages values must be integers in [0, 1, 2, 3]."
+            ) from exc
+        if stage not in {0, 1, 2, 3}:
+            raise argparse.ArgumentTypeError("uslgsf_stages values must be in [0, 1, 2, 3].")
+        if stage not in stages:
+            stages.append(stage)
+
+    if not stages:
+        raise argparse.ArgumentTypeError("uslgsf_stages must include at least one stage.")
+    return tuple(stages)
+
+
+def parse_uslgsf_smooth_kernels(value):
+    if isinstance(value, (tuple, list)):
+        kernels = tuple(int(kernel) for kernel in value)
+    else:
+        try:
+            kernels = tuple(int(item.strip()) for item in str(value).split(","))
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                "uslgsf_smooth_kernels must contain two odd integers, e.g. 3,7."
+            ) from exc
+    if len(kernels) != 2 or any(kernel <= 0 or kernel % 2 == 0 for kernel in kernels):
+        raise argparse.ArgumentTypeError(
+            "uslgsf_smooth_kernels must contain two positive odd integers."
+        )
+    if kernels[0] >= kernels[1]:
+        raise argparse.ArgumentTypeError(
+            "uslgsf_smooth_kernels must be ordered from small to large."
+        )
+    return kernels
+
+
 def parse_gag_stages(value):
     if isinstance(value, (tuple, list)):
         return tuple(value)
@@ -115,7 +162,7 @@ def parse_gag_stages(value):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default="CMUNeXt",
-                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR",
+                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_USLGSF", "CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR",
                              "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_SDFR",
                              "CMUNeXt_HSPM_SDFR_V2", "CMUNeXt_HSPM_UBRD",
                              "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
@@ -148,6 +195,19 @@ parser.add_argument('--ddsr_mode', type=str, default="skip_only", choices=["skip
                     help='Use DDSR only for decoder skips or propagate it through the encoder')
 parser.add_argument('--ddsr_aux_init', type=float, default=0.1,
                     help='Initial DDSR auxiliary residual blend for DualGAG_SpeckleEnhance')
+parser.add_argument('--uslgsf_stages', type=parse_uslgsf_stages, default=(0, 1),
+                    help='Comma-separated US-LGSF skip stages, e.g. 0,1 or 0,1,2')
+parser.add_argument('--uslgsf_smooth_kernels', type=parse_uslgsf_smooth_kernels, default=(3, 7),
+                    help='Small and large odd smoothing kernels for US-LGSF')
+parser.add_argument('--uslgsf_context_downsample', type=int, default=2,
+                    help='Downsampling factor for the US-LGSF low-frequency context path')
+parser.add_argument('--uslgsf_alpha_init', type=float, default=0.05,
+                    help='Initial effective US-LGSF residual blend')
+parser.add_argument('--uslgsf_alpha_max', type=float, default=0.5,
+                    help='Maximum effective US-LGSF residual blend')
+parser.add_argument('--uslgsf_mode', type=str, default="full",
+                    choices=["full", "context_only", "structure_only", "relevance_only"],
+                    help='US-LGSF full model or a core ablation mode')
 parser.add_argument('--gag_stages', type=parse_gag_stages, default=(2, 3),
                     help='Comma-separated DualGAG stages, e.g. 0,1 or 1,3 or 0,1,2,3')
 parser.add_argument('--boundary_loss_weight', type=float, default=0.3,
@@ -261,6 +321,16 @@ def get_model(args):
         model = MK_UNet(num_classes=args.num_classes, in_channels=3).cuda()
     elif args.model == "CMUNeXt":
         model = cmunext(num_classes=args.num_classes).cuda()
+    elif args.model == "CMUNeXt_USLGSF":
+        model = cmunext_uslgsf(
+            num_classes=args.num_classes,
+            uslgsf_stages=args.uslgsf_stages,
+            uslgsf_smooth_kernels=args.uslgsf_smooth_kernels,
+            uslgsf_context_downsample=args.uslgsf_context_downsample,
+            uslgsf_alpha_init=args.uslgsf_alpha_init,
+            uslgsf_alpha_max=args.uslgsf_alpha_max,
+            uslgsf_mode=args.uslgsf_mode,
+        ).cuda()
     elif args.model == "CMUNeXt_HSPM":
         model = cmunext_hspm(
             num_classes=args.num_classes,
@@ -781,11 +851,13 @@ def getDataloader(args):
                                transform=train_transform, train_file_dir=args.train_file_dir,
                                val_file_dir=args.val_file_dir,
                                return_sdf=args.model in SDFR_MODELS,
-                               sdf_truncation_ratio=args.sdfr_truncation_ratio)
+                               sdf_truncation_ratio=args.sdfr_truncation_ratio,
+                               divide_image_by_255=args.model == "CMUNeXt")
     db_val = MedicalDataSets(base_dir=args.base_dir, split="val", transform=val_transform,
                              train_file_dir=args.train_file_dir, val_file_dir=args.val_file_dir,
                              return_sdf=args.model in SDFR_MODELS,
-                             sdf_truncation_ratio=args.sdfr_truncation_ratio)
+                             sdf_truncation_ratio=args.sdfr_truncation_ratio,
+                             divide_image_by_255=args.model == "CMUNeXt")
     # <=== 修改 5: 将 print 替换为 logging.info
     logging.info("train num:{}, val num:{}".format(len(db_train), len(db_val)))
 

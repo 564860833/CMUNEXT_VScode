@@ -16,6 +16,7 @@ class MedicalDataSets(Dataset):
             val_file_dir="val.txt",
             return_sdf=False,
             sdf_truncation_ratio=0.08,
+            divide_image_by_255=False,
     ):
         self._base_dir = base_dir
         self.sample_list = []
@@ -25,6 +26,7 @@ class MedicalDataSets(Dataset):
         self.semi_list = []
         self.return_sdf = bool(return_sdf)
         self.sdf_truncation_ratio = float(sdf_truncation_ratio)
+        self.divide_image_by_255 = bool(divide_image_by_255)
         if self.sdf_truncation_ratio <= 0:
             raise ValueError("sdf_truncation_ratio must be positive.")
 
@@ -83,6 +85,8 @@ class MedicalDataSets(Dataset):
         label = augmented['mask']
 
         image = image.astype('float32')
+        if self.divide_image_by_255:
+            image = image / 255
         image = image.transpose(2, 0, 1)
 
         label = label.astype('float32') / 255
