@@ -10,8 +10,8 @@ class SignedDistanceLogitCorrection(nn.Module):
         self,
         channels,
         boundary_temperature=0.2,
-        correction_scale_init=1.0,
-        correction_scale_max=3.0,
+        correction_scale_init=0.1,
+        correction_scale_max=0.5,
     ):
         super().__init__()
         if boundary_temperature <= 0:
@@ -24,6 +24,7 @@ class SignedDistanceLogitCorrection(nn.Module):
         self.boundary_temperature = float(boundary_temperature)
         self.correction_scale_max = float(correction_scale_max)
         self.schedule_scale = 1.0
+        self.correction_trainable = True
 
         self.last_sdf_prior = None
         self.last_boundary_gate = None
@@ -82,6 +83,24 @@ class SignedDistanceLogitCorrection(nn.Module):
     def set_schedule_scale(self, scale):
         self.schedule_scale = min(max(float(scale), 0.0), 1.0)
 
+    def set_correction_trainable(self, trainable):
+        self.correction_trainable = bool(trainable)
+        for parameter in self.correction_features.parameters():
+            parameter.requires_grad_(self.correction_trainable)
+        for parameter in self.correction_head.parameters():
+            parameter.requires_grad_(self.correction_trainable)
+        self.correction_scale_raw.requires_grad_(self.correction_trainable)
+        if not self.correction_trainable:
+            self.correction_features.eval()
+            self.correction_head.eval()
+
+    def train(self, mode=True):
+        super().train(mode)
+        if not self.correction_trainable:
+            self.correction_features.eval()
+            self.correction_head.eval()
+        return self
+
     def diagnostics(self):
         if self.last_boundary_gate is None:
             return None
@@ -107,16 +126,25 @@ class SignedDistanceLogitCorrection(nn.Module):
         }
 
     def forward(self, feature, base_logits):
-        predicted_sdf = torch.tanh(self.sdf_head(self.sdf_features(feature)))
+        detached_feature = feature.detach()
+        detached_base_logits = base_logits.detach()
+        predicted_sdf = torch.tanh(
+            self.sdf_head(self.sdf_features(detached_feature))
+        )
         sdf_prior = predicted_sdf.detach()
         boundary_gate = torch.exp(
             -sdf_prior.abs() / self.boundary_temperature
-        )
-        base_probability = torch.sigmoid(base_logits).detach()
+        ).detach()
+        base_probability = torch.sigmoid(detached_base_logits)
         raw_correction = self.correction_head(
             self.correction_features(
                 torch.cat(
-                    [feature, base_probability, sdf_prior, boundary_gate],
+                    [
+                        detached_feature,
+                        base_probability,
+                        sdf_prior,
+                        boundary_gate,
+                    ],
                     dim=1,
                 )
             )
@@ -127,11 +155,11 @@ class SignedDistanceLogitCorrection(nn.Module):
         logit_correction = (
             self.schedule_scale * boundary_gate * bounded_correction
         )
-        final_logits = base_logits + logit_correction
+        final_logits = detached_base_logits + logit_correction
 
         self.last_sdf_prior = sdf_prior
         self.last_boundary_gate = boundary_gate
-        self.last_base_logits = base_logits
+        self.last_base_logits = detached_base_logits
         self.last_raw_correction = raw_correction
         self.last_bounded_correction = bounded_correction
         self.last_logit_correction = logit_correction
@@ -159,8 +187,8 @@ class CMUNeXt_HSPM_SDFR_V2(CMUNeXt_HSPM_SDFR):
         hspm_small_area_threshold=0.05,
         hspm_small_area_temperature=0.02,
         sdfr_boundary_temperature=0.2,
-        sdfr_v2_correction_scale_init=1.0,
-        sdfr_v2_correction_scale_max=3.0,
+        sdfr_v2_correction_scale_init=0.1,
+        sdfr_v2_correction_scale_max=0.5,
     ):
         super().__init__(
             input_channel=input_channel,
@@ -187,6 +215,29 @@ class CMUNeXt_HSPM_SDFR_V2(CMUNeXt_HSPM_SDFR):
             correction_scale_init=sdfr_v2_correction_scale_init,
             correction_scale_max=sdfr_v2_correction_scale_max,
         )
+        self.hspm_base_frozen = False
+
+    def freeze_hspm_base(self):
+        self.hspm_base_frozen = True
+        for name, parameter in self.named_parameters():
+            if not name.startswith("sdfr."):
+                parameter.requires_grad_(False)
+        self._set_hspm_base_eval()
+        return self
+
+    def set_sdfr_correction_trainable(self, trainable):
+        self.sdfr.set_correction_trainable(trainable)
+
+    def _set_hspm_base_eval(self):
+        for name, module in self.named_children():
+            if name != "sdfr":
+                module.eval()
+
+    def train(self, mode=True):
+        super().train(mode)
+        if self.hspm_base_frozen:
+            self._set_hspm_base_eval()
+        return self
 
     def forward(self, x):
         self.last_fusion_diagnostics = None
@@ -261,8 +312,8 @@ def cmunext_hspm_sdfr_v2(
     hspm_small_area_threshold=0.05,
     hspm_small_area_temperature=0.02,
     sdfr_boundary_temperature=0.2,
-    sdfr_v2_correction_scale_init=1.0,
-    sdfr_v2_correction_scale_max=3.0,
+    sdfr_v2_correction_scale_init=0.1,
+    sdfr_v2_correction_scale_max=0.5,
 ):
     return CMUNeXt_HSPM_SDFR_V2(
         input_channel=input_channel,

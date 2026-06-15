@@ -164,26 +164,30 @@ For SDF-only ablations, keep refinement disabled with
 `--sdfr_refine_start_epoch 300`. Use `--sdfr_sdf_warmup_epochs 0` for fixed
 SDF weighting, or `--sdfr_boundary_emphasis 0` to remove boundary weighting.
 
-`CMUNeXt_HSPM_SDFR_V2` keeps the same SDF supervision but replaces feature
-refinement with delayed, boundary-gated logit correction. Its boundary-band
-loss follows the same epoch 10-40 correction warmup:
+`CMUNeXt_HSPM_SDFR_V2` is the stable boundary-gated logit-correction variant.
+It initializes from a trained dual-path HSPM checkpoint, freezes the HSPM base
+for the full run, and isolates SDF/correction gradients from the base decoder.
+The correction and boundary-band loss follow the same epoch 10-40 warmup:
 
 ```bash
 python main.py --model CMUNeXt_HSPM_SDFR_V2 \
   --base_dir ./data/busi --train_file_dir busi_train3.txt --val_file_dir busi_val3.txt \
-  --save_dir ./checkpoint/6.15/busi-CMUNeXt_HSPM_SDFR_V2-full-3-a \
+  --save_dir ./checkpoint/6.16/busi-CMUNeXt_HSPM_SDFR_V2-stable-3-a \
   --base_lr 0.01 --epoch 300 --batch_size 8 \
+  --sdfr_v2_hspm_checkpoint ./checkpoint/6.14/busi-CMUNeXt_HSPM-dual-global-coarse-decay-3-a/CMUNeXt_HSPM_model.pth \
   --hspm_fusion_mode global --hspm_mixer_mode legacy \
-  --hspm_coarse_loss_weight 0.1 --hspm_coarse_loss_final_weight 0.02 \
-  --hspm_coarse_loss_decay_epochs 150 \
   --sdfr_sdf_loss_weight 0.2 --sdfr_sdf_warmup_epochs 10 \
   --sdfr_refine_start_epoch 10 --sdfr_refine_warmup_epochs 30 \
   --sdfr_truncation_ratio 0.08 --sdfr_boundary_temperature 0.2 \
   --sdfr_boundary_emphasis 4.0 \
-  --sdfr_v2_base_loss_weight 0.2 --sdfr_v2_band_width 0.2 \
+  --sdfr_v2_base_loss_weight 0 --sdfr_v2_band_width 0.2 \
   --sdfr_v2_band_loss_weight 0.1 \
-  --sdfr_v2_correction_scale_init 1.0 --sdfr_v2_correction_scale_max 3.0
+  --sdfr_v2_correction_scale_init 0.1 --sdfr_v2_correction_scale_max 0.5
 ```
+
+Old SDFR V2 checkpoints still load strictly. To reproduce their original
+correction scaling during inference, pass
+`--sdfr_v2_correction_scale_init 1.0 --sdfr_v2_correction_scale_max 3.0`.
 
 ## Inference
 

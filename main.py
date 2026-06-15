@@ -226,15 +226,17 @@ parser.add_argument('--sdfr_refine_scale_init', type=float, default=0.05,
                     help='Initial effective SDF refinement residual scale')
 parser.add_argument('--sdfr_refine_scale_max', type=float, default=0.3,
                     help='Maximum effective SDF refinement residual scale')
-parser.add_argument('--sdfr_v2_base_loss_weight', type=float, default=0.2,
-                    help='Base-logit segmentation loss weight for SDFR V2')
+parser.add_argument('--sdfr_v2_hspm_checkpoint', type=str, default=None,
+                    help='Required HSPM checkpoint used to initialize stable SDFR V2 training')
+parser.add_argument('--sdfr_v2_base_loss_weight', type=float, default=0.0,
+                    help='Compatibility option; stable SDFR V2 requires this to remain 0')
 parser.add_argument('--sdfr_v2_band_width', type=float, default=0.2,
                     help='Normalized target SDF width supervised by the SDFR V2 boundary-band loss')
 parser.add_argument('--sdfr_v2_band_loss_weight', type=float, default=0.1,
                     help='Maximum boundary-band BCE weight for SDFR V2')
-parser.add_argument('--sdfr_v2_correction_scale_init', type=float, default=1.0,
+parser.add_argument('--sdfr_v2_correction_scale_init', type=float, default=0.1,
                     help='Initial effective bounded logit-correction scale for SDFR V2')
-parser.add_argument('--sdfr_v2_correction_scale_max', type=float, default=3.0,
+parser.add_argument('--sdfr_v2_correction_scale_max', type=float, default=0.5,
                     help='Maximum effective bounded logit-correction scale for SDFR V2')
 parser.add_argument('--val_threshold_mode', type=str, default="fixed", choices=["fixed", "scan"],
                     help='Use a fixed validation threshold or scan a threshold range')
@@ -402,11 +404,11 @@ def get_model(args):
 def get_criterion(args):
     if args.model in SDFR_V2_MODELS:
         return losses.__dict__['SDFRV2Loss'](
-            coarse_weight=args.hspm_coarse_loss_weight,
+            coarse_weight=0.0,
             sdf_weight=args.sdfr_sdf_loss_weight,
             boundary_temperature=args.sdfr_boundary_temperature,
             boundary_emphasis=args.sdfr_boundary_emphasis,
-            base_weight=args.sdfr_v2_base_loss_weight,
+            base_weight=0.0,
             band_width=args.sdfr_v2_band_width,
             band_weight=args.sdfr_v2_band_loss_weight,
         ).cuda()
@@ -583,6 +585,49 @@ def get_sdfr_v2_band_weight(args, epoch_num):
     )
 
 
+def load_sdfr_v2_hspm_checkpoint(model, checkpoint_path):
+    hspm_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    state_dict = checkpoint.get("state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+    if not isinstance(state_dict, dict):
+        raise TypeError("SDFR V2 HSPM checkpoint must contain a state dictionary.")
+
+    state_dict = {
+        (key[7:] if key.startswith("module.") else key): value
+        for key, value in state_dict.items()
+    }
+    for suffix in ("weight", "bias"):
+        hspm_key = f"Conv_1x1.{suffix}"
+        sdfr_v2_key = f"seg_head.{suffix}"
+        if hspm_key in state_dict:
+            if sdfr_v2_key in state_dict:
+                raise RuntimeError(
+                    f"HSPM checkpoint contains both {hspm_key} and {sdfr_v2_key}."
+                )
+            state_dict[sdfr_v2_key] = state_dict.pop(hspm_key)
+
+    incompatible = hspm_model.load_state_dict(state_dict, strict=False)
+    invalid_missing = [
+        key for key in incompatible.missing_keys if not key.startswith("sdfr.")
+    ]
+    if invalid_missing or incompatible.unexpected_keys:
+        raise RuntimeError(
+            "Invalid HSPM checkpoint for stable SDFR V2: "
+            f"missing non-SDFR keys={invalid_missing}, "
+            f"unexpected keys={incompatible.unexpected_keys}."
+        )
+    return incompatible
+
+
+def freeze_sdfr_v2_hspm_base(model):
+    hspm_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+    hspm_model.freeze_hspm_base()
+    return [
+        name for name, parameter in hspm_model.named_parameters()
+        if parameter.requires_grad
+    ]
+
+
 def get_hspm_prototype_scale(args, epoch_num):
     if args.model not in HSPM_MODELS or args.hspm_mixer_mode != "stable":
         return 1.0
@@ -593,11 +638,17 @@ def get_hspm_prototype_scale(args, epoch_num):
 
 
 def configure_hspm_epoch(args, model, epoch_num):
-    if args.model in APBR_MODELS:
+    if args.model in SDFR_V2_MODELS:
+        coarse_weight = 0.0
+    elif args.model in APBR_MODELS:
         coarse_weight = get_apbr_coarse_weight(args, epoch_num)
     else:
         coarse_weight = get_hspm_coarse_weight(args, epoch_num)
-    prototype_scale = get_hspm_prototype_scale(args, epoch_num)
+    prototype_scale = (
+        1.0
+        if args.model in SDFR_V2_MODELS
+        else get_hspm_prototype_scale(args, epoch_num)
+    )
     effective_gamma = None
     if args.model in HSPM_MODELS:
         hspm_model = model.module if isinstance(model, torch.nn.DataParallel) else model
@@ -607,6 +658,10 @@ def configure_hspm_epoch(args, model, epoch_num):
         if args.model in SDFR_MODELS:
             hspm_model.set_sdfr_refine_schedule_scale(
                 get_sdfr_refine_schedule_scale(args, epoch_num)
+            )
+        if args.model in SDFR_V2_MODELS:
+            hspm_model.set_sdfr_correction_trainable(
+                epoch_num >= int(args.sdfr_refine_start_epoch)
             )
         effective_gamma = float(hspm_model.prototype_mixer.effective_gamma().detach().cpu())
         if args.hspm_mixer_mode == "stable":
@@ -772,6 +827,15 @@ def main(args):
         raise ValueError("SDFR refine scale init must be in (0, refine scale max).")
     if args.sdfr_v2_base_loss_weight < 0 or args.sdfr_v2_band_loss_weight < 0:
         raise ValueError("SDFR V2 loss weights must be non-negative.")
+    if args.model in SDFR_V2_MODELS and args.sdfr_v2_base_loss_weight != 0:
+        raise ValueError("Stable SDFR V2 requires --sdfr_v2_base_loss_weight 0.")
+    if args.model in SDFR_V2_MODELS:
+        if not args.sdfr_v2_hspm_checkpoint:
+            raise ValueError("Stable SDFR V2 requires --sdfr_v2_hspm_checkpoint.")
+        if not os.path.isfile(args.sdfr_v2_hspm_checkpoint):
+            raise FileNotFoundError(
+                f"SDFR V2 HSPM checkpoint not found: {args.sdfr_v2_hspm_checkpoint}"
+            )
     if not 0.0 < args.sdfr_v2_band_width <= 1.0:
         raise ValueError("SDFR V2 band width must be in (0, 1].")
     if not 0.0 < args.sdfr_v2_correction_scale_init < args.sdfr_v2_correction_scale_max:
@@ -801,6 +865,18 @@ def main(args):
 
     base_lr = args.base_lr
     model = get_model(args)
+    if args.model in SDFR_V2_MODELS:
+        incompatible = load_sdfr_v2_hspm_checkpoint(
+            model,
+            args.sdfr_v2_hspm_checkpoint,
+        )
+        trainable_names = freeze_sdfr_v2_hspm_base(model)
+        logging.info(
+            "=> Initialized stable SDFR V2 from %s; missing new SDFR keys: %s",
+            args.sdfr_v2_hspm_checkpoint,
+            incompatible.missing_keys,
+        )
+        logging.info("=> Stable SDFR V2 trainable parameters: %s", trainable_names)
     criterion = get_criterion(args)
     val_thresholds = build_validation_thresholds(args)
     trainloader, valloader = getDataloader(args=args)
@@ -814,7 +890,15 @@ def main(args):
         val_thresholds,
         args.val_threshold_metric,
     )
-    optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
+    trainable_parameters = [
+        parameter for parameter in model.parameters() if parameter.requires_grad
+    ]
+    optimizer = optim.SGD(
+        trainable_parameters,
+        lr=base_lr,
+        momentum=0.9,
+        weight_decay=0.0001,
+    )
 
     # <=== 修改 7: 将 print 替换为 logging.info
     logging.info("{} iterations per epoch".format(len(trainloader)))
@@ -962,8 +1046,9 @@ def main(args):
             )
             iou, dice, _, _, _, _, _ = iou_score(seg_logits, label_batch)
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            if loss.requires_grad:
+                loss.backward()
+                optimizer.step()
 
             lr_ = base_lr * (1.0 - iter_num / max_iterations) ** 0.9
             for param_group in optimizer.param_groups:

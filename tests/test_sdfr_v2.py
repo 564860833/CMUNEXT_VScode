@@ -1,6 +1,8 @@
 import sys
+import tempfile
 import unittest
 from argparse import Namespace
+from pathlib import Path
 from unittest import mock
 
 import torch
@@ -10,6 +12,7 @@ with mock.patch.object(sys, "argv", ["main.py"]):
 
 import infer as inference_main
 from src.network.conv_based.CMUNeXt_HSPM_SDFR import CMUNeXt_HSPM_SDFR
+from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
 from src.network.conv_based.CMUNeXt_HSPM_SDFR_V2 import (
     CMUNeXt_HSPM_SDFR_V2,
     SignedDistanceLogitCorrection,
@@ -90,12 +93,12 @@ class SDFRV2Tests(unittest.TestCase):
 
     def test_correction_scale_is_bounded(self):
         module = SignedDistanceLogitCorrection(channels=8)
-        self.assertAlmostEqual(module.effective_correction_scale().item(), 1.0, places=5)
+        self.assertAlmostEqual(module.effective_correction_scale().item(), 0.1, places=5)
         for value in (-100.0, 0.0, 100.0):
             module.correction_scale_raw.data.fill_(value)
             scale = module.effective_correction_scale().item()
             self.assertGreaterEqual(scale, 0.0)
-            self.assertLessEqual(scale, 3.000001)
+            self.assertLessEqual(scale, 0.500001)
 
     def test_loss_components_sum_and_empty_band_is_safe(self):
         outputs = self._small_model().eval()(torch.randn(2, 3, 32, 32))
@@ -118,7 +121,7 @@ class SDFRV2Tests(unittest.TestCase):
         self.assertEqual(components["band_weighted"].item(), 0.0)
         self.assertTrue(torch.isfinite(total))
 
-    def test_segmentation_and_band_losses_do_not_update_sdf_head(self):
+    def test_segmentation_and_band_losses_only_update_correction(self):
         model = self._small_model().train()
         model.sdfr.correction_head.bias.data.fill_(0.2)
         model.set_sdfr_refine_schedule_scale(1.0)
@@ -133,25 +136,91 @@ class SDFRV2Tests(unittest.TestCase):
         )(outputs, target, target_sdf).backward()
         self.assertIsNone(model.sdfr.sdf_head.weight.grad)
         self.assertIsNone(model.sdfr.sdf_features[0].weight.grad)
+        self.assertGreater(model.sdfr.correction_head.weight.grad.abs().sum().item(), 0.0)
+        self.assertIsNone(model.Up_conv2.conv[0].weight.grad)
+        self.assertIsNone(model.seg_head.weight.grad)
 
-    def test_sdf_and_band_losses_update_expected_paths(self):
+    def test_sdf_loss_only_updates_sdf_path(self):
         model = self._small_model().train()
         model.set_sdfr_refine_schedule_scale(1.0)
         outputs = model(torch.randn(2, 3, 32, 32))
         target = torch.randint(0, 2, (2, 1, 32, 32)).float()
         target_sdf = torch.full((2, 1, 32, 32), 0.1)
-        SDFRV2Loss(
+        _, components = SDFRV2Loss(
             coarse_weight=0.0,
             sdf_weight=0.2,
             base_weight=0.0,
-            band_weight=1.0,
-        )(outputs, target, target_sdf).backward()
+            band_weight=0.0,
+        )(outputs, target, target_sdf, return_components=True)
+        components["sdf_weighted"].backward()
         self.assertGreater(model.sdfr.sdf_head.weight.grad.abs().sum().item(), 0.0)
-        self.assertGreater(
-            model.sdfr.correction_head.weight.grad.abs().sum().item(),
-            0.0,
+        self.assertIsNone(model.sdfr.correction_head.weight.grad)
+        self.assertIsNone(model.Up_conv2.conv[0].weight.grad)
+        self.assertIsNone(model.seg_head.weight.grad)
+
+    def test_frozen_hspm_stays_eval_and_buffers_do_not_change(self):
+        model = self._small_model().freeze_hspm_base()
+        before = {
+            name: value.clone()
+            for name, value in model.named_buffers()
+            if not name.startswith("sdfr.")
+        }
+        model.train()
+        self.assertTrue(model.sdfr.training)
+        for name, module in model.named_children():
+            if name != "sdfr":
+                self.assertFalse(module.training)
+        model(torch.randn(2, 3, 32, 32))
+        after = dict(model.named_buffers())
+        for name, value in before.items():
+            self.assertTrue(torch.equal(value, after[name]), name)
+        self.assertTrue(
+            all(
+                not parameter.requires_grad
+                for name, parameter in model.named_parameters()
+                if not name.startswith("sdfr.")
+            )
         )
-        self.assertIsNotNone(model.Up_conv2.conv[0].weight.grad)
+
+    def test_hspm_checkpoint_initialization_only_leaves_sdfr_missing(self):
+        hspm = cmunext_hspm(
+            dims=(4, 8, 16, 20, 24),
+            depths=(1, 1, 1, 1, 1),
+            kernels=(3, 3, 3, 3, 3),
+            hspm_mixer_mode="stable",
+            hspm_gamma_init=0.05,
+            hspm_gamma_max=0.3,
+            hspm_temperature=0.5,
+            hspm_backbone_mode="dual_path",
+        )
+        model = self._small_model()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checkpoint_path = Path(temp_dir) / "hspm.pth"
+            torch.save(hspm.state_dict(), checkpoint_path)
+            incompatible = training_main.load_sdfr_v2_hspm_checkpoint(
+                model,
+                checkpoint_path,
+            )
+
+        self.assertTrue(incompatible.missing_keys)
+        self.assertTrue(
+            all(key.startswith("sdfr.") for key in incompatible.missing_keys)
+        )
+        self.assertFalse(incompatible.unexpected_keys)
+        expected = hspm.state_dict()
+        actual = model.state_dict()
+        for key, value in expected.items():
+            mapped_key = key.replace("Conv_1x1.", "seg_head.")
+            self.assertTrue(torch.equal(value, actual[mapped_key]), mapped_key)
+        hspm.eval()
+        model.eval()
+        model.set_sdfr_refine_schedule_scale(0.0)
+        image = torch.randn(2, 3, 32, 32)
+        with torch.no_grad():
+            hspm_seg = hspm(image)["seg"]
+            outputs = model(image)
+        self.assertTrue(torch.equal(outputs["base_seg"], hspm_seg))
+        self.assertTrue(torch.equal(outputs["seg"], hspm_seg))
 
     def test_training_schedule_and_dynamic_band_weight(self):
         args = Namespace(
@@ -170,6 +239,50 @@ class SDFRV2Tests(unittest.TestCase):
                 training_main.get_sdfr_v2_band_weight(args, epoch),
                 band_weight,
             )
+
+    def test_training_schedule_freezes_then_enables_correction(self):
+        args = Namespace(
+            model="CMUNeXt_HSPM_SDFR_V2",
+            hspm_mixer_mode="legacy",
+            hspm_coarse_loss_weight=0.1,
+            hspm_coarse_loss_final_weight=0.02,
+            hspm_coarse_loss_decay_epochs=150,
+            hspm_prototype_warmup_epochs=0,
+            sdfr_refine_start_epoch=10,
+            sdfr_refine_warmup_epochs=30,
+        )
+        model = self._small_model().freeze_hspm_base()
+        expected = {
+            0: (0.0, False),
+            10: (0.0, True),
+            25: (0.5, True),
+            40: (1.0, True),
+        }
+        for epoch, (schedule, correction_trainable) in expected.items():
+            coarse_weight, prototype_scale, _ = training_main.configure_hspm_epoch(
+                args,
+                model,
+                epoch,
+            )
+            self.assertEqual(coarse_weight, 0.0)
+            self.assertEqual(prototype_scale, 1.0)
+            self.assertAlmostEqual(model.sdfr.schedule_scale, schedule)
+            self.assertEqual(model.sdfr.correction_trainable, correction_trainable)
+
+    def test_epoch_zero_stable_loss_has_no_gradient(self):
+        model = self._small_model().freeze_hspm_base().train()
+        model.set_sdfr_correction_trainable(False)
+        model.set_sdfr_refine_schedule_scale(0.0)
+        outputs = model(torch.randn(2, 3, 32, 32))
+        target = torch.randint(0, 2, (2, 1, 32, 32)).float()
+        target_sdf = torch.zeros(2, 1, 32, 32)
+        loss = SDFRV2Loss(
+            coarse_weight=0.0,
+            sdf_weight=0.0,
+            base_weight=0.0,
+            band_weight=0.0,
+        )(outputs, target, target_sdf)
+        self.assertFalse(loss.requires_grad)
 
     def test_training_compute_loss_uses_dynamic_band_weight(self):
         args = Namespace(model="CMUNeXt_HSPM_SDFR_V2")
@@ -204,6 +317,11 @@ class SDFRV2Tests(unittest.TestCase):
         inference_model = inference_main.build_model(args, parser=None)
         self.assertIsInstance(inference_model, CMUNeXt_HSPM_SDFR_V2)
         inference_model.load_state_dict(inference_model.state_dict(), strict=True)
+        legacy_v2 = cmunext_hspm_sdfr_v2(
+            sdfr_v2_correction_scale_init=1.0,
+            sdfr_v2_correction_scale_max=3.0,
+        )
+        inference_model.load_state_dict(legacy_v2.state_dict(), strict=True)
 
         v1_args = Namespace(**vars(args))
         v1_args.model = "CMUNeXt_HSPM_SDFR"

@@ -697,15 +697,15 @@ if __name__ == "__main__":
                         help="Initial effective SDF refinement residual scale")
     parser.add_argument("--sdfr_refine_scale_max", type=float, default=0.3,
                         help="Maximum effective SDF refinement residual scale")
-    parser.add_argument("--sdfr_v2_base_loss_weight", type=float, default=0.2,
-                        help="Base-logit segmentation loss weight for SDFR V2")
+    parser.add_argument("--sdfr_v2_base_loss_weight", type=float, default=0.0,
+                        help="Compatibility option; stable SDFR V2 keeps base loss disabled")
     parser.add_argument("--sdfr_v2_band_width", type=float, default=0.2,
                         help="Normalized target SDF width supervised by SDFR V2")
     parser.add_argument("--sdfr_v2_band_loss_weight", type=float, default=0.1,
                         help="Boundary-band BCE weight for SDFR V2")
-    parser.add_argument("--sdfr_v2_correction_scale_init", type=float, default=1.0,
+    parser.add_argument("--sdfr_v2_correction_scale_init", type=float, default=0.1,
                         help="Initial effective bounded logit-correction scale for SDFR V2")
-    parser.add_argument("--sdfr_v2_correction_scale_max", type=float, default=3.0,
+    parser.add_argument("--sdfr_v2_correction_scale_max", type=float, default=0.5,
                         help="Maximum effective bounded logit-correction scale for SDFR V2")
     parser.add_argument("--val_threshold_mode", type=str, default="fixed", choices=["fixed", "scan"],
                         help="Use a fixed validation threshold or scan a threshold range")
@@ -751,11 +751,11 @@ if __name__ == "__main__":
 
     if args.model in SDFR_V2_MODELS:
         criterion = losses.__dict__["SDFRV2Loss"](
-            coarse_weight=args.hspm_coarse_loss_weight,
+            coarse_weight=0.0,
             sdf_weight=args.sdfr_sdf_loss_weight,
             boundary_temperature=args.sdfr_boundary_temperature,
             boundary_emphasis=args.sdfr_boundary_emphasis,
-            base_weight=args.sdfr_v2_base_loss_weight,
+            base_weight=0.0,
             band_width=args.sdfr_v2_band_width,
             band_weight=args.sdfr_v2_band_loss_weight,
         ).to(device)

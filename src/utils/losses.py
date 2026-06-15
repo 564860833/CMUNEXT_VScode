@@ -325,7 +325,7 @@ class SDFRV2Loss(SDFRLoss):
         sdf_weight=0.2,
         boundary_temperature=0.2,
         boundary_emphasis=4.0,
-        base_weight=0.2,
+        base_weight=0.0,
         band_width=0.2,
         band_weight=0.1,
     ):
@@ -359,7 +359,7 @@ class SDFRV2Loss(SDFRLoss):
     ):
         if not isinstance(outputs, dict):
             raise TypeError("SDFRV2Loss expects model outputs to be a dictionary.")
-        required_keys = {"seg", "base_seg", "coarse", "sdf"}
+        required_keys = {"seg", "base_seg", "coarse", "sdf", "logit_correction"}
         missing_keys = required_keys.difference(outputs)
         if missing_keys:
             raise KeyError(f"SDFRV2Loss requires output keys: {sorted(required_keys)}.")
@@ -379,10 +379,16 @@ class SDFRV2Loss(SDFRLoss):
             raise ValueError("Dynamic SDFR V2 loss weights must be non-negative.")
 
         seg = self.seg_loss(outputs["seg"], target)
-        base_weighted = self.base_weight * self.seg_loss(outputs["base_seg"], target)
+        base_weighted = seg.new_zeros(())
         coarse_weighted = seg.new_zeros(())
         sdf_weighted = seg.new_zeros(())
         band_weighted = seg.new_zeros(())
+
+        if self.base_weight > 0:
+            base_weighted = self.base_weight * self.seg_loss(
+                outputs["base_seg"],
+                target,
+            )
 
         if current_coarse_weight > 0:
             coarse_target = F.interpolate(
@@ -427,8 +433,9 @@ class SDFRV2Loss(SDFRLoss):
                     size=outputs["seg"].shape[-2:],
                     mode="nearest",
                 )
+            band_logits = outputs["base_seg"].detach() + outputs["logit_correction"]
             band_elementwise = F.binary_cross_entropy_with_logits(
-                outputs["seg"],
+                band_logits,
                 target,
                 reduction="none",
             )
