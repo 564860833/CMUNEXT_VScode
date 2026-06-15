@@ -83,6 +83,7 @@ def build_model(config):
         raise ValueError(f"Unsupported Oracle Recovery model: {model_name}")
     return factories[model_name](
         num_classes=config.get("num_classes", 1),
+        dims=tuple(config.get("hspm_dims", (16, 32, 128, 160, 256))),
         hspm_mode=config.get("hspm_mode", "full"),
         hspm_mixer_mode=config.get("hspm_mixer_mode", "legacy"),
         hspm_gamma_init=config.get("hspm_gamma_init", 0.1),
