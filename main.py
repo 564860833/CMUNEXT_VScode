@@ -30,6 +30,7 @@ from src.network.conv_based.UNetplus import ResNet34UnetPlus
 from src.network.conv_based.UNet3plus import UNet3plus
 from src.network.conv_based.CMUNeXt import cmunext
 from src.network.conv_based.CMUNeXt_USLGSF import cmunext_uslgsf
+from src.network.conv_based.CMUNeXt_USLGSF_V2 import cmunext_uslgsf_v2
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
 from src.network.conv_based.CMUNeXt_HSPM_APBR import cmunext_hspm_apbr
 from src.network.conv_based.CMUNeXt_HSPM_APBR_V2 import cmunext_hspm_apbr_v2
@@ -180,7 +181,7 @@ def parse_gag_stages(value):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default="CMUNeXt",
-                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_USLGSF", "CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR",
+                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR",
                              "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_SDFR",
                              "CMUNeXt_HSPM_SDFR_V2", "CMUNeXt_HSPM_UBRD",
                              "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
@@ -343,6 +344,16 @@ def get_model(args):
         model = cmunext(num_classes=args.num_classes).cuda()
     elif args.model == "CMUNeXt_USLGSF":
         model = cmunext_uslgsf(
+            num_classes=args.num_classes,
+            uslgsf_stages=args.uslgsf_stages,
+            uslgsf_smooth_kernels=args.uslgsf_smooth_kernels,
+            uslgsf_context_downsample=args.uslgsf_context_downsample,
+            uslgsf_alpha_init=args.uslgsf_alpha_init,
+            uslgsf_alpha_max=args.uslgsf_alpha_max,
+            uslgsf_mode=args.uslgsf_mode,
+        ).cuda()
+    elif args.model == "CMUNeXt_USLGSF_V2":
+        model = cmunext_uslgsf_v2(
             num_classes=args.num_classes,
             uslgsf_stages=args.uslgsf_stages,
             uslgsf_smooth_kernels=args.uslgsf_smooth_kernels,

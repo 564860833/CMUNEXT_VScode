@@ -139,6 +139,37 @@ Use `--uslgsf_mode context_only`, `structure_only`, or `relevance_only` for
 core ablations. Stage ablations can be run with `--uslgsf_stages 0` or
 `--uslgsf_stages 0,1,2`.
 
+### Identity-safe US-LGSF V2
+
+`CMUNeXt_USLGSF_V2` keeps the original US-LGSF model and checkpoints intact,
+but changes skip refinement to an identity-safe, uncertainty-routed residual.
+The decoder relevance map supplies a detached uncertainty gate, and stage 0
+always keeps full-resolution context while deeper stages use
+`--uslgsf_context_downsample`:
+
+```bash
+python main.py --model CMUNeXt_USLGSF_V2 \
+  --base_dir ./data/busi --train_file_dir busi_train3.txt --val_file_dir busi_val3.txt \
+  --save_dir ./checkpoint/busi-CMUNeXt_USLGSF_V2-full-3-a \
+  --base_lr 0.01 --epoch 300 --batch_size 8 \
+  --uslgsf_stages 0,1 \
+  --uslgsf_smooth_kernels 3,7 \
+  --uslgsf_context_downsample 2 \
+  --uslgsf_alpha_init 0.05 --uslgsf_alpha_max 0.5 \
+  --uslgsf_mode full
+```
+
+Validate a V2 checkpoint with the same US-LGSF options:
+
+```bash
+python infer.py --model CMUNeXt_USLGSF_V2 \
+  --model_path ./checkpoint/busi-CMUNeXt_USLGSF_V2-full-3-a/CMUNeXt_USLGSF_V2_model.pth \
+  --base_dir ./data/busi --train_file_dir busi_train3.txt --val_file_dir busi_val3.txt \
+  --uslgsf_stages 0,1 --uslgsf_context_downsample 2
+```
+
+V1 checkpoints are not migrated to V2; train V2 from a fresh initialization.
+
 For the first APBR structure-validation run, keep the strongest HSPM settings fixed,
 warm up APBR routing, and disable boundary loss and coarse-loss decay:
 
