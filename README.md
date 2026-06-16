@@ -100,22 +100,6 @@ python main.py --model CMUNeXt_HSPM \
   --use_extra_aug --extra_aug_profile hspm_safe
 ```
 
-HSPM channel widths can be changed without editing the model code. The default
-`--hspm_dims 16,32,128,160,256` preserves existing checkpoints. A lightweight
-dual-path configuration uses about 1.59M parameters:
-
-```bash
-python main.py --model CMUNeXt_HSPM \
-  --base_dir ./data/busi --train_file_dir busi_train3.txt --val_file_dir busi_val3.txt \
-  --save_dir ./checkpoint/busi-CMUNeXt_HSPM-light-dual-3-a \
-  --base_lr 0.01 --epoch 300 --batch_size 8 \
-  --hspm_backbone_mode dual_path \
-  --hspm_dims 16,32,64,128,160
-```
-
-Use the same `--hspm_dims` value with `infer.py` when loading the resulting
-checkpoint.
-
 ### US-LGSF skip fusion
 
 `CMUNeXt_USLGSF` replaces selected CMUNeXt skip connections with ultrasound

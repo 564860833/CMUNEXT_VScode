@@ -68,7 +68,6 @@ USLGSF_V3_DIAGNOSTIC_NAMES = (
     "residual_delta_abs_mean",
     "injection_encoder_rms_ratio",
 )
-DEFAULT_HSPM_DIMS = (16, 32, 128, 160, 256)
 
 
 def seed_torch(seed):
@@ -152,23 +151,6 @@ def parse_uslgsf_smooth_kernels(value):
     return kernels
 
 
-def parse_hspm_dims(value):
-    if isinstance(value, (tuple, list)):
-        dims = tuple(int(dim) for dim in value)
-    else:
-        try:
-            dims = tuple(int(item.strip()) for item in str(value).split(","))
-        except ValueError as exc:
-            raise argparse.ArgumentTypeError(
-                "hspm_dims must contain five positive integers, e.g. 16,32,64,128,160."
-            ) from exc
-    if len(dims) != 5 or any(dim <= 0 for dim in dims):
-        raise argparse.ArgumentTypeError(
-            "hspm_dims must contain exactly five positive integers."
-        )
-    return dims
-
-
 def parse_gag_stages(value):
     if isinstance(value, (tuple, list)):
         return tuple(value)
@@ -248,8 +230,6 @@ parser.add_argument('--boundary_loss_weight', type=float, default=0.3,
                     help='Boundary loss weight for CMUNeXt_BA_DualGAG')
 parser.add_argument('--hspm_mode', type=str, default="full", choices=["full", "context_only"],
                     help='Enable the full HSPM or keep only its high-resolution context bottleneck')
-parser.add_argument('--hspm_dims', type=parse_hspm_dims, default=DEFAULT_HSPM_DIMS,
-                    help='Five comma-separated HSPM channel widths from shallow to deep')
 parser.add_argument('--hspm_coarse_loss_weight', type=float, default=0.3,
                     help='Auxiliary coarse segmentation loss weight for CMUNeXt_HSPM')
 parser.add_argument('--hspm_mixer_mode', type=str, default="legacy", choices=["legacy", "bounded", "stable"],
@@ -391,7 +371,6 @@ def get_model(args):
     elif args.model == "CMUNeXt_HSPM":
         model = cmunext_hspm(
             num_classes=args.num_classes,
-            dims=getattr(args, "hspm_dims", DEFAULT_HSPM_DIMS),
             hspm_mode=args.hspm_mode,
             hspm_mixer_mode=args.hspm_mixer_mode,
             hspm_gamma_init=args.hspm_gamma_init,
@@ -408,7 +387,6 @@ def get_model(args):
     elif args.model == "CMUNeXt_HSPM_APBR":
         model = cmunext_hspm_apbr(
             num_classes=args.num_classes,
-            dims=getattr(args, "hspm_dims", DEFAULT_HSPM_DIMS),
             hspm_mode=args.hspm_mode,
             hspm_mixer_mode=args.hspm_mixer_mode,
             hspm_gamma_init=args.hspm_gamma_init,
@@ -425,7 +403,6 @@ def get_model(args):
     elif args.model == "CMUNeXt_HSPM_APBR_V2":
         model = cmunext_hspm_apbr_v2(
             num_classes=args.num_classes,
-            dims=getattr(args, "hspm_dims", DEFAULT_HSPM_DIMS),
             hspm_mode=args.hspm_mode,
             hspm_mixer_mode=args.hspm_mixer_mode,
             hspm_gamma_init=args.hspm_gamma_init,
@@ -442,7 +419,6 @@ def get_model(args):
     elif args.model == "CMUNeXt_HSPM_SDFR":
         model = cmunext_hspm_sdfr(
             num_classes=args.num_classes,
-            dims=getattr(args, "hspm_dims", DEFAULT_HSPM_DIMS),
             hspm_mode=args.hspm_mode,
             hspm_mixer_mode=args.hspm_mixer_mode,
             hspm_gamma_init=args.hspm_gamma_init,
@@ -461,7 +437,6 @@ def get_model(args):
     elif args.model == "CMUNeXt_HSPM_SDFR_V2":
         model = cmunext_hspm_sdfr_v2(
             num_classes=args.num_classes,
-            dims=getattr(args, "hspm_dims", DEFAULT_HSPM_DIMS),
             hspm_mode=args.hspm_mode,
             hspm_mixer_mode=args.hspm_mixer_mode,
             hspm_gamma_init=args.hspm_gamma_init,
@@ -480,7 +455,6 @@ def get_model(args):
     elif args.model == "CMUNeXt_HSPM_UBRD":
         model = cmunext_hspm_ubrd(
             num_classes=args.num_classes,
-            dims=getattr(args, "hspm_dims", DEFAULT_HSPM_DIMS),
             hspm_mode=args.hspm_mode,
             ubrd_mode=args.ubrd_mode,
         ).cuda()

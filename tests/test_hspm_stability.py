@@ -45,35 +45,6 @@ class HSPMStabilityTests(unittest.TestCase):
             self.assertEqual(outputs["seg"].shape, (2, 1, 32, 32))
             self.assertEqual(outputs["coarse"].shape, (2, 1, 4, 4))
 
-    def test_hspm_dims_cli_parser_keeps_default_and_accepts_lightweight_widths(self):
-        default_args = training_main.parser.parse_args([])
-        lightweight_args = training_main.parser.parse_args(
-            ["--hspm_dims", "16,32,64,128,160"]
-        )
-
-        self.assertEqual(default_args.hspm_dims, (16, 32, 128, 160, 256))
-        self.assertEqual(lightweight_args.hspm_dims, (16, 32, 64, 128, 160))
-
-    def test_hspm_dims_cli_parser_rejects_invalid_widths(self):
-        for value in ("16,32,64,128", "16,32,0,128,160", "16,32,x,128,160"):
-            with self.assertRaises(SystemExit):
-                training_main.parser.parse_args(["--hspm_dims", value])
-
-    def test_lightweight_dual_path_reduces_parameters_and_keeps_output_contract(self):
-        baseline = cmunext_hspm(hspm_backbone_mode="dual_path").eval()
-        lightweight = cmunext_hspm(
-            dims=(16, 32, 64, 128, 160),
-            hspm_backbone_mode="dual_path",
-        ).eval()
-
-        self.assertLess(
-            sum(parameter.numel() for parameter in lightweight.parameters()),
-            sum(parameter.numel() for parameter in baseline.parameters()),
-        )
-        with torch.no_grad():
-            outputs = lightweight(torch.randn(1, 3, 32, 32))
-        self.assertEqual(outputs["seg"].shape, (1, 1, 32, 32))
-
     def test_dual_path_keeps_output_contract(self):
         model = self._small_model("legacy", backbone_mode="dual_path").eval()
         with torch.no_grad():
