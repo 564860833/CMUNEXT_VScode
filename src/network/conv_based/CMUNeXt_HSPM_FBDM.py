@@ -84,6 +84,7 @@ class FBDM(nn.Module):
         semantic_gate_base=0.7,
         gate_init=0.03,
         gate_max=0.2,
+        edge_aux_only=False,
         eps=1e-6,
     ):
         super().__init__()
@@ -106,6 +107,7 @@ class FBDM(nn.Module):
         self.semantic_uncertainty_weight = float(semantic_uncertainty_weight)
         self.semantic_coarse_weight = float(semantic_coarse_weight)
         self.semantic_gate_base = float(semantic_gate_base)
+        self.edge_aux_only = bool(edge_aux_only)
         self.eps = float(eps)
         self.dwt = FixedHaarDWT()
         self.sobel_edge = FixedSobelEdge(eps=eps)
@@ -221,7 +223,8 @@ class FBDM(nn.Module):
         gate = torch.sigmoid(self.gate_proj(gate_input))
         out = x + self.effective_gamma() * gate * residual
         edge_logits = self.edge_head(out)
-        return out, edge_logits
+        main_feature = x if self.edge_aux_only else out
+        return main_feature, edge_logits
 
 
 class CMUNeXt_HSPM_FBDM(CMUNeXt_HSPM):
@@ -251,6 +254,7 @@ class CMUNeXt_HSPM_FBDM(CMUNeXt_HSPM):
         fbdm_semantic_gate_base=0.7,
         fbdm_gate_init=0.03,
         fbdm_gate_max=0.2,
+        fbdm_edge_aux_only=False,
     ):
         super().__init__(
             input_channel=input_channel,
@@ -281,6 +285,7 @@ class CMUNeXt_HSPM_FBDM(CMUNeXt_HSPM):
             semantic_gate_base=fbdm_semantic_gate_base,
             gate_init=fbdm_gate_init,
             gate_max=fbdm_gate_max,
+            edge_aux_only=fbdm_edge_aux_only,
         )
 
     def forward(self, x):

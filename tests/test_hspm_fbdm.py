@@ -28,6 +28,7 @@ class HSPMFBDMTests(unittest.TestCase):
         self.assertEqual(outputs["seg"].shape, (2, 1, 32, 32))
         self.assertEqual(outputs["edge"].shape, (2, 1, 32, 32))
         self.assertEqual(outputs["coarse"].shape, (2, 1, 4, 4))
+        self.assertFalse(model.fbdm1.edge_aux_only)
         self.assertAlmostEqual(model.fbdm1.effective_gamma().item(), 0.03, places=5)
 
     def test_fbdm_residual_scale_controls_effective_gamma(self):
@@ -40,6 +41,28 @@ class HSPMFBDMTests(unittest.TestCase):
         self.assertAlmostEqual(module.effective_gamma().item(), 0.0, places=5)
         module.set_residual_scale(2.0)
         self.assertAlmostEqual(module.effective_gamma().item(), 0.03, places=5)
+
+    def test_fbdm_edge_aux_only_returns_original_feature_but_trains_edge_head(self):
+        module = FBDM(channels=4, use_hspm_prior=False, edge_aux_only=True).eval()
+        x = torch.randn(2, 4, 16, 16, requires_grad=True)
+
+        out, edge_logits = module(x)
+
+        self.assertTrue(torch.equal(out, x))
+        self.assertEqual(edge_logits.shape, (2, 1, 16, 16))
+        edge_logits.mean().backward()
+        self.assertIsNotNone(x.grad)
+        self.assertIsNotNone(module.edge_head.weight.grad)
+
+    def test_hspm_fbdm_edge_aux_only_output_contract_is_preserved(self):
+        model = self._small_model(fbdm_edge_aux_only=True).eval()
+        with torch.no_grad():
+            outputs = model(torch.randn(2, 3, 32, 32))
+
+        self.assertTrue(model.fbdm1.edge_aux_only)
+        self.assertEqual(set(outputs), {"seg", "coarse", "uncertainty", "edge"})
+        self.assertEqual(outputs["seg"].shape, (2, 1, 32, 32))
+        self.assertEqual(outputs["edge"].shape, (2, 1, 32, 32))
 
     def test_dual_path_size_aware_fusion_diagnostics_are_preserved(self):
         model = self._small_model(

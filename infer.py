@@ -151,6 +151,7 @@ def build_model(args, parser):
             num_classes=args.num_classes,
             fbdm_gate_init=args.fbdm_gate_init,
             fbdm_gate_max=args.fbdm_gate_max,
+            fbdm_edge_aux_only=args.fbdm_edge_aux_only,
         )
     elif args.model == "CMUNeXt_USLGSF":
         model = cmunext_uslgsf(
@@ -221,6 +222,7 @@ def build_model(args, parser):
             fbdm_semantic_gate_base=args.fbdm_semantic_gate_base,
             fbdm_gate_init=args.fbdm_gate_init,
             fbdm_gate_max=args.fbdm_gate_max,
+            fbdm_edge_aux_only=args.fbdm_edge_aux_only,
         )
     elif args.model == "CMUNeXt_HSPM_APBR":
         model = cmunext_hspm_apbr(
@@ -800,6 +802,8 @@ if __name__ == "__main__":
                         help="Initial effective FBDM residual strength")
     parser.add_argument("--fbdm_gate_max", type=float, default=0.2,
                         help="Maximum effective FBDM residual strength")
+    parser.add_argument("--fbdm_edge_aux_only", action="store_true",
+                        help="Use FBDM only as an edge auxiliary branch without residual injection")
     parser.add_argument("--fbdm_edge_loss_weight", type=float, default=0.05,
                         help="Auxiliary edge loss weight for FBDM models")
     parser.add_argument("--fbdm_edge_kernel_size", type=int, default=3,

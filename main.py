@@ -280,6 +280,8 @@ parser.add_argument('--fbdm_gate_init', type=float, default=0.03,
                     help='Initial effective FBDM residual strength')
 parser.add_argument('--fbdm_gate_max', type=float, default=0.2,
                     help='Maximum effective FBDM residual strength')
+parser.add_argument('--fbdm_edge_aux_only', action='store_true',
+                    help='Train FBDM edge auxiliary branch without injecting its residual into the segmentation path')
 parser.add_argument('--fbdm_edge_loss_weight', type=float, default=0.05,
                     help='Auxiliary edge loss weight for FBDM models')
 parser.add_argument('--fbdm_edge_loss_final_weight', type=float, default=None,
@@ -371,6 +373,7 @@ def get_model(args):
             num_classes=args.num_classes,
             fbdm_gate_init=args.fbdm_gate_init,
             fbdm_gate_max=args.fbdm_gate_max,
+            fbdm_edge_aux_only=args.fbdm_edge_aux_only,
         ).cuda()
     elif args.model == "CMUNeXt_USLGSF":
         model = cmunext_uslgsf(
@@ -441,6 +444,7 @@ def get_model(args):
             fbdm_semantic_gate_base=args.fbdm_semantic_gate_base,
             fbdm_gate_init=args.fbdm_gate_init,
             fbdm_gate_max=args.fbdm_gate_max,
+            fbdm_edge_aux_only=args.fbdm_edge_aux_only,
         ).cuda()
     elif args.model == "CMUNeXt_HSPM_APBR":
         model = cmunext_hspm_apbr(

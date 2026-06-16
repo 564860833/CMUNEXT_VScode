@@ -15,6 +15,7 @@ class CMUNeXt_FBDM(nn.Module):
         kernels=(3, 3, 7, 7, 7),
         fbdm_gate_init=0.03,
         fbdm_gate_max=0.2,
+        fbdm_edge_aux_only=False,
     ):
         super().__init__()
         self.Maxpool = nn.MaxPool2d(kernel_size=2, stride=2)
@@ -41,6 +42,7 @@ class CMUNeXt_FBDM(nn.Module):
             use_hspm_prior=False,
             gate_init=fbdm_gate_init,
             gate_max=fbdm_gate_max,
+            edge_aux_only=fbdm_edge_aux_only,
         )
 
     def forward(self, x):

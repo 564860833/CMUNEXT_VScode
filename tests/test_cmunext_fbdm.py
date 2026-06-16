@@ -32,7 +32,18 @@ class CMUNeXtFBDMTests(unittest.TestCase):
         self.assertEqual(outputs["seg"].shape, (2, 1, 32, 32))
         self.assertEqual(outputs["edge"].shape, (2, 1, 32, 32))
         self.assertFalse(model.fbdm1.use_hspm_prior)
+        self.assertFalse(model.fbdm1.edge_aux_only)
         self.assertAlmostEqual(model.fbdm1.effective_gamma().item(), 0.03, places=5)
+
+    def test_edge_aux_only_output_contract_is_fbdm_only(self):
+        model = self._small_model(fbdm_edge_aux_only=True).eval()
+        with torch.no_grad():
+            outputs = model(torch.randn(2, 3, 32, 32))
+
+        self.assertTrue(model.fbdm1.edge_aux_only)
+        self.assertEqual(set(outputs), {"seg", "edge"})
+        self.assertEqual(outputs["seg"].shape, (2, 1, 32, 32))
+        self.assertEqual(outputs["edge"].shape, (2, 1, 32, 32))
 
     def test_factories_smoke_test(self):
         for factory in (cmunext_fbdm_s, cmunext_fbdm_l):
