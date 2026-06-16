@@ -9,6 +9,8 @@ __all__ = [
     'SobelBoundaryLoss',
     'BoundaryAwareSegLoss',
     'HSPMLoss',
+    'HSPMFBDMLoss',
+    'mask_to_edge',
     'UBRDLoss',
     'APBRLoss',
     'SDFRLoss',
@@ -133,6 +135,64 @@ class HSPMLoss(nn.Module):
         coarse_target = F.interpolate(target, size=outputs["coarse"].shape[-2:], mode="nearest")
         coarse_loss = self.seg_loss(outputs["coarse"], coarse_target)
         return final_loss + current_coarse_weight * coarse_loss
+
+
+def mask_to_edge(mask, kernel_size=3):
+    if kernel_size <= 0 or kernel_size % 2 == 0:
+        raise ValueError("kernel_size must be a positive odd integer.")
+    mask = mask.float().clamp(0.0, 1.0)
+    padding = kernel_size // 2
+    dilation = F.max_pool2d(mask, kernel_size=kernel_size, stride=1, padding=padding)
+    erosion = 1.0 - F.max_pool2d(1.0 - mask, kernel_size=kernel_size, stride=1, padding=padding)
+    return (dilation - erosion).clamp(0.0, 1.0)
+
+
+class HSPMFBDMLoss(nn.Module):
+    def __init__(self, coarse_weight=0.3, edge_weight=0.05, edge_kernel_size=3):
+        super().__init__()
+        if coarse_weight < 0:
+            raise ValueError("coarse_weight must be non-negative.")
+        if edge_weight < 0:
+            raise ValueError("edge_weight must be non-negative.")
+        self.coarse_weight = float(coarse_weight)
+        self.edge_weight = float(edge_weight)
+        self.edge_kernel_size = int(edge_kernel_size)
+        self.seg_loss = BCEDiceLoss()
+
+    def forward(self, outputs, target, coarse_weight=None, edge_weight=None, return_components=False):
+        if not isinstance(outputs, dict):
+            raise TypeError("HSPMFBDMLoss expects model outputs to be a dictionary.")
+        if "seg" not in outputs or "coarse" not in outputs:
+            raise KeyError("HSPMFBDMLoss requires 'seg' and 'coarse' output keys.")
+
+        current_coarse_weight = self.coarse_weight if coarse_weight is None else float(coarse_weight)
+        current_edge_weight = self.edge_weight if edge_weight is None else float(edge_weight)
+        if current_coarse_weight < 0 or current_edge_weight < 0:
+            raise ValueError("dynamic HSPM-FBDM loss weights must be non-negative.")
+
+        seg = self.seg_loss(outputs["seg"], target)
+        coarse_weighted = seg.new_zeros(())
+        edge_weighted = seg.new_zeros(())
+        if current_coarse_weight > 0:
+            coarse_target = F.interpolate(target, size=outputs["coarse"].shape[-2:], mode="nearest")
+            coarse_weighted = current_coarse_weight * self.seg_loss(outputs["coarse"], coarse_target)
+        if current_edge_weight > 0:
+            if "edge" not in outputs:
+                raise KeyError("HSPMFBDMLoss requires 'edge' output when edge_weight > 0.")
+            edge_target = mask_to_edge(target, kernel_size=self.edge_kernel_size)
+            if edge_target.shape[-2:] != outputs["edge"].shape[-2:]:
+                edge_target = F.interpolate(edge_target, size=outputs["edge"].shape[-2:], mode="nearest")
+            edge_weighted = current_edge_weight * self.seg_loss(outputs["edge"], edge_target)
+
+        total = seg + coarse_weighted + edge_weighted
+        if not return_components:
+            return total
+        return total, {
+            "seg": seg,
+            "coarse_weighted": coarse_weighted,
+            "edge_weighted": edge_weighted,
+            "total": total,
+        }
 
 
 class UBRDLoss(nn.Module):

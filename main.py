@@ -33,6 +33,7 @@ from src.network.conv_based.CMUNeXt_USLGSF import cmunext_uslgsf
 from src.network.conv_based.CMUNeXt_USLGSF_V2 import cmunext_uslgsf_v2
 from src.network.conv_based.CMUNeXt_USLGSF_V3 import cmunext_uslgsf_v3
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
+from src.network.conv_based.CMUNeXt_HSPM_FBDM import cmunext_hspm_fbdm
 from src.network.conv_based.CMUNeXt_HSPM_APBR import cmunext_hspm_apbr
 from src.network.conv_based.CMUNeXt_HSPM_APBR_V2 import cmunext_hspm_apbr_v2
 from src.network.conv_based.CMUNeXt_HSPM_SDFR import cmunext_hspm_sdfr
@@ -53,9 +54,10 @@ from src.network.hybrid_based.Mobile_U_ViT import mobileuvit, mobileuvit_l
 
 
 APBR_MODELS = {"CMUNeXt_HSPM_APBR", "CMUNeXt_HSPM_APBR_V2"}
+FBDM_MODELS = {"CMUNeXt_HSPM_FBDM"}
 SDFR_V2_MODELS = {"CMUNeXt_HSPM_SDFR_V2"}
 SDFR_MODELS = {"CMUNeXt_HSPM_SDFR", *SDFR_V2_MODELS}
-HSPM_MODELS = {"CMUNeXt_HSPM", *APBR_MODELS, *SDFR_MODELS}
+HSPM_MODELS = {"CMUNeXt_HSPM", *FBDM_MODELS, *APBR_MODELS, *SDFR_MODELS}
 USLGSF_V3_MODELS = {"CMUNeXt_USLGSF_V3"}
 USLGSF_V3_DIAGNOSTIC_NAMES = (
     "structure_reliability_mean",
@@ -176,7 +178,7 @@ def parse_gag_stages(value):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default="CMUNeXt",
-                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", "CMUNeXt_HSPM_APBR",
+                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", "CMUNeXt_HSPM_FBDM", "CMUNeXt_HSPM_APBR",
                              "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_SDFR",
                              "CMUNeXt_HSPM_SDFR_V2", "CMUNeXt_HSPM_UBRD",
                              "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
@@ -261,6 +263,24 @@ parser.add_argument('--hspm_coarse_loss_final_weight', type=float, default=None,
                     help='Final HSPM coarse loss weight; defaults to the initial weight')
 parser.add_argument('--hspm_coarse_loss_decay_epochs', type=int, default=0,
                     help='Epochs used to linearly decay the HSPM coarse loss weight')
+parser.add_argument('--fbdm_no_hspm_prior', action='store_true',
+                    help='Disable HSPM coarse/uncertainty priors inside CMUNeXt_HSPM_FBDM')
+parser.add_argument('--fbdm_no_detach_hspm_prior', action='store_true',
+                    help='Allow FBDM gradients to flow into HSPM priors; default keeps priors detached')
+parser.add_argument('--fbdm_semantic_uncertainty_weight', type=float, default=0.7,
+                    help='Uncertainty weight in the FBDM semantic boundary prior')
+parser.add_argument('--fbdm_semantic_coarse_weight', type=float, default=0.3,
+                    help='Coarse probability weight in the FBDM semantic boundary prior')
+parser.add_argument('--fbdm_semantic_gate_base', type=float, default=0.7,
+                    help='Conservative base term in the FBDM boundary gate')
+parser.add_argument('--fbdm_gate_init', type=float, default=0.03,
+                    help='Initial effective FBDM residual strength')
+parser.add_argument('--fbdm_gate_max', type=float, default=0.2,
+                    help='Maximum effective FBDM residual strength')
+parser.add_argument('--fbdm_edge_loss_weight', type=float, default=0.05,
+                    help='Auxiliary edge loss weight for CMUNeXt_HSPM_FBDM')
+parser.add_argument('--fbdm_edge_kernel_size', type=int, default=3,
+                    help='Odd kernel size used to build edge supervision masks for CMUNeXt_HSPM_FBDM')
 parser.add_argument('--early_stop_patience', type=int, default=0,
                     help='Stop after this many epochs without a significant validation IoU improvement; 0 disables')
 parser.add_argument('--early_stop_min_delta', type=float, default=0.001,
@@ -383,6 +403,29 @@ def get_model(args):
             hspm_fusion_mode=args.hspm_fusion_mode,
             hspm_small_area_threshold=args.hspm_small_area_threshold,
             hspm_small_area_temperature=args.hspm_small_area_temperature,
+        ).cuda()
+    elif args.model == "CMUNeXt_HSPM_FBDM":
+        model = cmunext_hspm_fbdm(
+            num_classes=args.num_classes,
+            hspm_mode=args.hspm_mode,
+            hspm_mixer_mode=args.hspm_mixer_mode,
+            hspm_gamma_init=args.hspm_gamma_init,
+            hspm_gamma_max=args.hspm_gamma_max,
+            hspm_temperature=args.hspm_temperature,
+            hspm_prototype_dropout=args.hspm_prototype_dropout,
+            hspm_backbone_mode=args.hspm_backbone_mode,
+            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
+            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
+            hspm_fusion_mode=args.hspm_fusion_mode,
+            hspm_small_area_threshold=args.hspm_small_area_threshold,
+            hspm_small_area_temperature=args.hspm_small_area_temperature,
+            fbdm_use_hspm_prior=not args.fbdm_no_hspm_prior,
+            fbdm_detach_hspm_prior=not args.fbdm_no_detach_hspm_prior,
+            fbdm_semantic_uncertainty_weight=args.fbdm_semantic_uncertainty_weight,
+            fbdm_semantic_coarse_weight=args.fbdm_semantic_coarse_weight,
+            fbdm_semantic_gate_base=args.fbdm_semantic_gate_base,
+            fbdm_gate_init=args.fbdm_gate_init,
+            fbdm_gate_max=args.fbdm_gate_max,
         ).cuda()
     elif args.model == "CMUNeXt_HSPM_APBR":
         model = cmunext_hspm_apbr(
@@ -537,6 +580,12 @@ def get_criterion(args):
             coarse_weight=args.hspm_coarse_loss_weight,
             boundary_weight=args.ubrd_boundary_loss_weight,
         ).cuda()
+    if args.model in FBDM_MODELS:
+        return losses.__dict__['HSPMFBDMLoss'](
+            coarse_weight=args.hspm_coarse_loss_weight,
+            edge_weight=args.fbdm_edge_loss_weight,
+            edge_kernel_size=args.fbdm_edge_kernel_size,
+        ).cuda()
     if args.model == "CMUNeXt_HSPM":
         return losses.__dict__['HSPMLoss'](coarse_weight=args.hspm_coarse_loss_weight).cuda()
     if args.model in {"CMUNeXt_BA_DualGAG", "CMUNeXt_BA_DualGAG_SpeckleEnhance"}:
@@ -631,6 +680,8 @@ def compute_loss(
             coarse_weight=aux_weight,
             return_components=True,
         )
+    if args.model in FBDM_MODELS:
+        return criterion(outputs, label_batch, coarse_weight=aux_weight)
     if args.model == "CMUNeXt_HSPM":
         return criterion(outputs, label_batch, coarse_weight=aux_weight)
     return criterion(outputs, label_batch)
@@ -929,6 +980,16 @@ def main(args):
         raise ValueError("hspm_coarse_loss_final_weight must be non-negative.")
     if args.hspm_coarse_loss_decay_epochs < 0 or args.hspm_prototype_warmup_epochs < 0:
         raise ValueError("HSPM schedule epochs must be non-negative.")
+    if args.fbdm_semantic_uncertainty_weight < 0 or args.fbdm_semantic_coarse_weight < 0:
+        raise ValueError("FBDM semantic prior weights must be non-negative.")
+    if not 0.0 <= args.fbdm_semantic_gate_base <= 1.0:
+        raise ValueError("fbdm_semantic_gate_base must be in [0, 1].")
+    if not 0.0 < args.fbdm_gate_init < args.fbdm_gate_max:
+        raise ValueError("fbdm_gate_init must be in (0, fbdm_gate_max).")
+    if args.fbdm_edge_loss_weight < 0:
+        raise ValueError("fbdm_edge_loss_weight must be non-negative.")
+    if args.fbdm_edge_kernel_size <= 0 or args.fbdm_edge_kernel_size % 2 == 0:
+        raise ValueError("fbdm_edge_kernel_size must be a positive odd integer.")
     if args.apbr_coarse_loss_weight < 0 or args.apbr_coarse_loss_final_weight < 0:
         raise ValueError("APBR coarse loss weights must be non-negative.")
     if args.apbr_coarse_loss_decay_epochs < 0 or args.apbr_route_warmup_epochs < 0:
