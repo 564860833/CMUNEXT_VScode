@@ -840,6 +840,14 @@ if __name__ == "__main__":
                         help="Maximum effective bounded logit-correction scale for FBDM V2")
     parser.add_argument("--fbdm_correction_warmup_epochs", type=int, default=40,
                         help="Training-only compatibility option; inference uses full correction scale")
+    parser.add_argument("--fbdm_boundary_band_loss_weight", type=float, default=0.0,
+                        help="Boundary-band loss weight for FBDM V2 evaluation")
+    parser.add_argument("--fbdm_boundary_band_loss_final_weight", type=float, default=None,
+                        help="Training-only compatibility option")
+    parser.add_argument("--fbdm_boundary_band_loss_decay_epochs", type=int, default=0,
+                        help="Training-only compatibility option")
+    parser.add_argument("--fbdm_boundary_band_kernel_size", type=int, default=7,
+                        help="Odd kernel size used to build GT boundary bands for FBDM V2 evaluation")
     parser.add_argument("--early_stop_patience", type=int, default=0,
                         help="Training-only compatibility option")
     parser.add_argument("--early_stop_min_delta", type=float, default=0.001,
@@ -925,6 +933,23 @@ if __name__ == "__main__":
         parser.error("--fbdm_correction_scale_init must be in (0, --fbdm_correction_scale_max).")
     if args.fbdm_correction_warmup_epochs < 0:
         parser.error("--fbdm_correction_warmup_epochs must be non-negative.")
+    if args.fbdm_boundary_band_loss_weight < 0:
+        parser.error("--fbdm_boundary_band_loss_weight must be non-negative.")
+    if (
+        args.fbdm_boundary_band_loss_final_weight is not None
+        and args.fbdm_boundary_band_loss_final_weight < 0
+    ):
+        parser.error("--fbdm_boundary_band_loss_final_weight must be non-negative.")
+    if args.fbdm_boundary_band_loss_decay_epochs < 0:
+        parser.error("--fbdm_boundary_band_loss_decay_epochs must be non-negative.")
+    if args.fbdm_boundary_band_kernel_size <= 0 or args.fbdm_boundary_band_kernel_size % 2 == 0:
+        parser.error("--fbdm_boundary_band_kernel_size must be a positive odd integer.")
+    boundary_band_enabled = args.fbdm_boundary_band_loss_weight > 0 or (
+        args.fbdm_boundary_band_loss_final_weight is not None
+        and args.fbdm_boundary_band_loss_final_weight > 0
+    )
+    if boundary_band_enabled and args.model not in HSPM_FBDM_V2_MODELS:
+        parser.error("--fbdm_boundary_band_loss_weight is only supported by CMUNeXt_HSPM_FBDM_V2.")
     if args.visual_mode == "selected" and not args.visual_case:
         parser.error("--visual_case is required when --visual_mode selected")
 
@@ -981,6 +1006,8 @@ if __name__ == "__main__":
             coarse_weight=args.hspm_coarse_loss_weight,
             edge_weight=args.fbdm_edge_loss_weight,
             edge_kernel_size=args.fbdm_edge_kernel_size,
+            boundary_band_weight=args.fbdm_boundary_band_loss_weight,
+            boundary_band_kernel_size=args.fbdm_boundary_band_kernel_size,
         ).to(device)
     elif args.model in FBDM_ONLY_MODELS:
         criterion = losses.__dict__["FBDMLoss"](

@@ -149,18 +149,39 @@ def mask_to_edge(mask, kernel_size=3):
 
 
 class HSPMFBDMLoss(nn.Module):
-    def __init__(self, coarse_weight=0.3, edge_weight=0.05, edge_kernel_size=3):
+    def __init__(
+        self,
+        coarse_weight=0.3,
+        edge_weight=0.05,
+        edge_kernel_size=3,
+        boundary_band_weight=0.0,
+        boundary_band_kernel_size=7,
+    ):
         super().__init__()
         if coarse_weight < 0:
             raise ValueError("coarse_weight must be non-negative.")
         if edge_weight < 0:
             raise ValueError("edge_weight must be non-negative.")
+        if boundary_band_weight < 0:
+            raise ValueError("boundary_band_weight must be non-negative.")
+        if boundary_band_kernel_size <= 0 or boundary_band_kernel_size % 2 == 0:
+            raise ValueError("boundary_band_kernel_size must be a positive odd integer.")
         self.coarse_weight = float(coarse_weight)
         self.edge_weight = float(edge_weight)
         self.edge_kernel_size = int(edge_kernel_size)
+        self.boundary_band_weight = float(boundary_band_weight)
+        self.boundary_band_kernel_size = int(boundary_band_kernel_size)
         self.seg_loss = BCEDiceLoss()
 
-    def forward(self, outputs, target, coarse_weight=None, edge_weight=None, return_components=False):
+    def forward(
+        self,
+        outputs,
+        target,
+        coarse_weight=None,
+        edge_weight=None,
+        boundary_band_weight=None,
+        return_components=False,
+    ):
         if not isinstance(outputs, dict):
             raise TypeError("HSPMFBDMLoss expects model outputs to be a dictionary.")
         if "seg" not in outputs or "coarse" not in outputs:
@@ -168,12 +189,18 @@ class HSPMFBDMLoss(nn.Module):
 
         current_coarse_weight = self.coarse_weight if coarse_weight is None else float(coarse_weight)
         current_edge_weight = self.edge_weight if edge_weight is None else float(edge_weight)
-        if current_coarse_weight < 0 or current_edge_weight < 0:
+        current_boundary_band_weight = (
+            self.boundary_band_weight
+            if boundary_band_weight is None
+            else float(boundary_band_weight)
+        )
+        if min(current_coarse_weight, current_edge_weight, current_boundary_band_weight) < 0:
             raise ValueError("dynamic HSPM-FBDM loss weights must be non-negative.")
 
         seg = self.seg_loss(outputs["seg"], target)
         coarse_weighted = seg.new_zeros(())
         edge_weighted = seg.new_zeros(())
+        boundary_band_weighted = seg.new_zeros(())
         if current_coarse_weight > 0:
             coarse_target = F.interpolate(target, size=outputs["coarse"].shape[-2:], mode="nearest")
             coarse_weighted = current_coarse_weight * self.seg_loss(outputs["coarse"], coarse_target)
@@ -184,14 +211,43 @@ class HSPMFBDMLoss(nn.Module):
             if edge_target.shape[-2:] != outputs["edge"].shape[-2:]:
                 edge_target = F.interpolate(edge_target, size=outputs["edge"].shape[-2:], mode="nearest")
             edge_weighted = current_edge_weight * self.seg_loss(outputs["edge"], edge_target)
+        if current_boundary_band_weight > 0:
+            required_keys = {"base_seg", "logit_correction"}
+            missing_keys = required_keys.difference(outputs)
+            if missing_keys:
+                raise KeyError(
+                    "HSPMFBDMLoss boundary-band loss requires output keys: "
+                    f"{sorted(required_keys)}."
+                )
+            band_logits = outputs["base_seg"].detach() + outputs["logit_correction"]
+            band_target = target
+            if band_target.shape[-2:] != band_logits.shape[-2:]:
+                band_target = F.interpolate(
+                    band_target,
+                    size=band_logits.shape[-2:],
+                    mode="nearest",
+                )
+            band = mask_to_edge(target, kernel_size=self.boundary_band_kernel_size)
+            if band.shape[-2:] != band_logits.shape[-2:]:
+                band = F.interpolate(band, size=band_logits.shape[-2:], mode="nearest")
+            band = band.to(device=band_logits.device, dtype=band_logits.dtype)
+            band_target = band_target.to(device=band_logits.device, dtype=band_logits.dtype)
+            band_elementwise = F.binary_cross_entropy_with_logits(
+                band_logits,
+                band_target,
+                reduction="none",
+            )
+            band_loss = (band * band_elementwise).sum() / band.sum().clamp_min(1.0)
+            boundary_band_weighted = current_boundary_band_weight * band_loss
 
-        total = seg + coarse_weighted + edge_weighted
+        total = seg + coarse_weighted + edge_weighted + boundary_band_weighted
         if not return_components:
             return total
         return total, {
             "seg": seg,
             "coarse_weighted": coarse_weighted,
             "edge_weighted": edge_weighted,
+            "boundary_band_weighted": boundary_band_weighted,
             "total": total,
         }
 

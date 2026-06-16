@@ -1,6 +1,12 @@
 import unittest
+import sys
+from argparse import Namespace
+from unittest import mock
 
 import torch
+
+with mock.patch.object(sys, "argv", ["main.py"]):
+    import main as training_main
 
 from src.network.conv_based.CMUNeXt_HSPM_FBDM import (
     FBDM,
@@ -141,6 +147,93 @@ class HSPMFBDMTests(unittest.TestCase):
         self.assertIsNotNone(model.Conv_1x1.weight.grad)
         self.assertIsNotNone(model.fbdm1.edge_head.weight.grad)
         self.assertIsNotNone(model.fbdm_correction.correction_head.weight.grad)
+
+    def test_hspm_fbdm_v2_boundary_band_loss_components_sum(self):
+        model = self._small_v2_model().eval()
+        target = torch.zeros(2, 1, 32, 32)
+        target[:, :, 8:24, 10:22] = 1.0
+        outputs = model(torch.randn(2, 3, 32, 32))
+
+        total, components = HSPMFBDMLoss(
+            coarse_weight=0.1,
+            edge_weight=0.03,
+            boundary_band_weight=1.0,
+            boundary_band_kernel_size=7,
+        )(outputs, target, return_components=True)
+
+        expected = (
+            components["seg"]
+            + components["coarse_weighted"]
+            + components["edge_weighted"]
+            + components["boundary_band_weighted"]
+        )
+        self.assertTrue(torch.allclose(total, expected))
+        self.assertGreater(components["boundary_band_weighted"].item(), 0.0)
+        self.assertTrue(torch.isfinite(total))
+
+    def test_hspm_fbdm_v2_empty_boundary_band_is_safe(self):
+        model = self._small_v2_model().eval()
+        target = torch.zeros(2, 1, 32, 32)
+        outputs = model(torch.randn(2, 3, 32, 32))
+
+        total, components = HSPMFBDMLoss(
+            coarse_weight=0.0,
+            edge_weight=0.0,
+            boundary_band_weight=1.0,
+            boundary_band_kernel_size=7,
+        )(outputs, target, return_components=True)
+
+        self.assertTrue(torch.isfinite(total))
+        self.assertEqual(components["boundary_band_weighted"].item(), 0.0)
+
+    def test_hspm_fbdm_v2_boundary_band_loss_only_updates_correction(self):
+        model = self._small_v2_model().train()
+        target = torch.zeros(2, 1, 32, 32)
+        target[:, :, 8:24, 10:22] = 1.0
+        outputs = model(torch.randn(2, 3, 32, 32))
+
+        _, components = HSPMFBDMLoss(
+            coarse_weight=0.0,
+            edge_weight=0.0,
+            boundary_band_weight=1.0,
+            boundary_band_kernel_size=7,
+        )(outputs, target, return_components=True)
+        components["boundary_band_weighted"].backward()
+
+        self.assertGreater(model.fbdm_correction.correction_head.weight.grad.abs().sum().item(), 0.0)
+        self.assertIsNone(model.Conv_1x1.weight.grad)
+        self.assertIsNone(model.Up_conv2.conv[0].weight.grad)
+
+    def test_hspm_fbdm_boundary_band_loss_requires_v2_outputs(self):
+        model = self._small_model().eval()
+        target = torch.zeros(2, 1, 32, 32)
+        target[:, :, 8:24, 10:22] = 1.0
+        outputs = model(torch.randn(2, 3, 32, 32))
+
+        with self.assertRaises(KeyError):
+            HSPMFBDMLoss(
+                coarse_weight=0.0,
+                edge_weight=0.0,
+                boundary_band_weight=1.0,
+            )(outputs, target)
+
+    def test_fbdm_boundary_band_weight_schedule(self):
+        args = Namespace(
+            fbdm_boundary_band_loss_weight=0.03,
+            fbdm_boundary_band_loss_final_weight=0.005,
+            fbdm_boundary_band_loss_decay_epochs=150,
+        )
+        expected = {
+            0: 0.03,
+            75: 0.0175,
+            150: 0.005,
+            300: 0.005,
+        }
+        for epoch, band_weight in expected.items():
+            self.assertAlmostEqual(
+                training_main.get_fbdm_boundary_band_weight(args, epoch),
+                band_weight,
+            )
 
     def test_dual_path_size_aware_fusion_diagnostics_are_preserved(self):
         model = self._small_model(

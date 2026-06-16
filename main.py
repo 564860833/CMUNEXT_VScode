@@ -308,6 +308,14 @@ parser.add_argument('--fbdm_correction_scale_max', type=float, default=0.3,
                     help='Maximum effective bounded logit-correction scale for FBDM V2')
 parser.add_argument('--fbdm_correction_warmup_epochs', type=int, default=40,
                     help='Epochs used to linearly warm up FBDM V2 logit correction')
+parser.add_argument('--fbdm_boundary_band_loss_weight', type=float, default=0.0,
+                    help='Boundary-band loss weight for FBDM V2 logit correction')
+parser.add_argument('--fbdm_boundary_band_loss_final_weight', type=float, default=None,
+                    help='Final FBDM V2 boundary-band loss weight; defaults to the initial weight')
+parser.add_argument('--fbdm_boundary_band_loss_decay_epochs', type=int, default=0,
+                    help='Epochs used to linearly decay the FBDM V2 boundary-band loss weight')
+parser.add_argument('--fbdm_boundary_band_kernel_size', type=int, default=7,
+                    help='Odd kernel size used to build GT boundary bands for FBDM V2 correction')
 parser.add_argument('--early_stop_patience', type=int, default=0,
                     help='Stop after this many epochs without a significant validation IoU improvement; 0 disables')
 parser.add_argument('--early_stop_min_delta', type=float, default=0.001,
@@ -645,6 +653,8 @@ def get_criterion(args):
             coarse_weight=args.hspm_coarse_loss_weight,
             edge_weight=args.fbdm_edge_loss_weight,
             edge_kernel_size=args.fbdm_edge_kernel_size,
+            boundary_band_weight=args.fbdm_boundary_band_loss_weight,
+            boundary_band_kernel_size=args.fbdm_boundary_band_kernel_size,
         ).cuda()
     if args.model in FBDM_ONLY_MODELS:
         return losses.__dict__['FBDMLoss'](
@@ -752,6 +762,7 @@ def compute_loss(
             label_batch,
             coarse_weight=aux_weight,
             edge_weight=edge_weight,
+            boundary_band_weight=band_weight,
             return_components=True,
         )
     if args.model in FBDM_ONLY_MODELS:
@@ -813,6 +824,19 @@ def get_fbdm_correction_schedule_scale(args, epoch_num):
     if warmup_epochs <= 0:
         return 1.0
     return min(max(float(epoch_num) / warmup_epochs, 0.0), 1.0)
+
+
+def get_fbdm_boundary_band_weight(args, epoch_num):
+    initial_weight = float(args.fbdm_boundary_band_loss_weight)
+    final_weight = args.fbdm_boundary_band_loss_final_weight
+    if final_weight is None:
+        final_weight = initial_weight
+    final_weight = float(final_weight)
+    decay_epochs = int(args.fbdm_boundary_band_loss_decay_epochs)
+    if decay_epochs <= 0:
+        return initial_weight
+    progress = min(max(float(epoch_num) / decay_epochs, 0.0), 1.0)
+    return initial_weight + progress * (final_weight - initial_weight)
 
 
 def get_apbr_route_scale(args, epoch_num):
@@ -1129,6 +1153,23 @@ def main(args):
         raise ValueError("FBDM V2 correction warmup epochs must be non-negative.")
     if args.fbdm_edge_kernel_size <= 0 or args.fbdm_edge_kernel_size % 2 == 0:
         raise ValueError("fbdm_edge_kernel_size must be a positive odd integer.")
+    if args.fbdm_boundary_band_loss_weight < 0:
+        raise ValueError("fbdm_boundary_band_loss_weight must be non-negative.")
+    if (
+        args.fbdm_boundary_band_loss_final_weight is not None
+        and args.fbdm_boundary_band_loss_final_weight < 0
+    ):
+        raise ValueError("fbdm_boundary_band_loss_final_weight must be non-negative.")
+    if args.fbdm_boundary_band_loss_decay_epochs < 0:
+        raise ValueError("fbdm_boundary_band_loss_decay_epochs must be non-negative.")
+    if args.fbdm_boundary_band_kernel_size <= 0 or args.fbdm_boundary_band_kernel_size % 2 == 0:
+        raise ValueError("fbdm_boundary_band_kernel_size must be a positive odd integer.")
+    boundary_band_enabled = args.fbdm_boundary_band_loss_weight > 0 or (
+        args.fbdm_boundary_band_loss_final_weight is not None
+        and args.fbdm_boundary_band_loss_final_weight > 0
+    )
+    if boundary_band_enabled and args.model not in HSPM_FBDM_V2_MODELS:
+        raise ValueError("FBDM boundary-band loss is only supported by CMUNeXt_HSPM_FBDM_V2.")
     if args.apbr_coarse_loss_weight < 0 or args.apbr_coarse_loss_final_weight < 0:
         raise ValueError("APBR coarse loss weights must be non-negative.")
     if args.apbr_coarse_loss_decay_epochs < 0 or args.apbr_route_warmup_epochs < 0:
@@ -1259,6 +1300,16 @@ def main(args):
             if args.model in SDFR_V2_MODELS
             else 0.0
         )
+        current_fbdm_boundary_band_weight = (
+            get_fbdm_boundary_band_weight(args, epoch_num)
+            if args.model in HSPM_FBDM_V2_MODELS
+            else 0.0
+        )
+        current_band_weight = (
+            current_sdfr_v2_band_weight
+            if args.model in SDFR_V2_MODELS
+            else current_fbdm_boundary_band_weight
+        )
         model.train()
         avg_meters = {'loss': AverageMeter(),
                       'iou': AverageMeter(),
@@ -1311,9 +1362,11 @@ def main(args):
                 ):
                     avg_meters[f"apbr_{stage_name}_{diagnostic_name}"] = AverageMeter()
         if args.model in FBDM_MODELS:
-            component_names = ["seg", "edge_weighted", "total"]
+            component_names = ["seg", "edge_weighted"]
             if args.model in HSPM_FBDM_MODELS:
                 component_names.insert(1, "coarse_weighted")
+                component_names.append("boundary_band_weighted")
+            component_names.append("total")
             for prefix in ("train", "val"):
                 for component_name in component_names:
                     avg_meters[f"{prefix}_loss_{component_name}"] = AverageMeter()
@@ -1379,7 +1432,7 @@ def main(args):
                 aux_weight=current_coarse_weight,
                 edge_weight=current_edge_weight,
                 sdf_weight=current_sdfr_sdf_weight,
-                band_weight=current_sdfr_v2_band_weight,
+                band_weight=current_band_weight,
             )
             loss = get_loss_tensor(loss_output)
             update_loss_component_meters(
@@ -1483,7 +1536,7 @@ def main(args):
                     aux_weight=current_coarse_weight,
                     edge_weight=current_edge_weight,
                     sdf_weight=current_sdfr_sdf_weight,
-                    band_weight=current_sdfr_v2_band_weight,
+                    band_weight=current_band_weight,
                 )
                 loss = get_loss_tensor(loss_output)
                 update_loss_component_meters(
@@ -1725,15 +1778,18 @@ def main(args):
             if args.model in HSPM_FBDM_MODELS:
                 logging.info(
                     "FBDM loss components: train(seg=%.6f - coarse=%.6f"
-                    " - edge=%.6f - total=%.6f) - val(seg=%.6f - coarse=%.6f"
-                    " - edge=%.6f - total=%.6f)",
+                    " - edge=%.6f - band=%.6f - total=%.6f)"
+                    " - val(seg=%.6f - coarse=%.6f - edge=%.6f"
+                    " - band=%.6f - total=%.6f)",
                     avg_meters["train_loss_seg"].avg,
                     avg_meters["train_loss_coarse_weighted"].avg,
                     avg_meters["train_loss_edge_weighted"].avg,
+                    avg_meters["train_loss_boundary_band_weighted"].avg,
                     avg_meters["train_loss_total"].avg,
                     avg_meters["val_loss_seg"].avg,
                     avg_meters["val_loss_coarse_weighted"].avg,
                     avg_meters["val_loss_edge_weighted"].avg,
+                    avg_meters["val_loss_boundary_band_weighted"].avg,
                     avg_meters["val_loss_total"].avg,
                 )
             else:
