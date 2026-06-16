@@ -30,6 +30,17 @@ class HSPMFBDMTests(unittest.TestCase):
         self.assertEqual(outputs["coarse"].shape, (2, 1, 4, 4))
         self.assertAlmostEqual(model.fbdm1.effective_gamma().item(), 0.03, places=5)
 
+    def test_fbdm_residual_scale_controls_effective_gamma(self):
+        module = FBDM(channels=4)
+
+        self.assertAlmostEqual(module.effective_gamma().item(), 0.03, places=5)
+        module.set_residual_scale(0.5)
+        self.assertAlmostEqual(module.effective_gamma().item(), 0.015, places=5)
+        module.set_residual_scale(-1.0)
+        self.assertAlmostEqual(module.effective_gamma().item(), 0.0, places=5)
+        module.set_residual_scale(2.0)
+        self.assertAlmostEqual(module.effective_gamma().item(), 0.03, places=5)
+
     def test_dual_path_size_aware_fusion_diagnostics_are_preserved(self):
         model = self._small_model(
             hspm_backbone_mode="dual_path",

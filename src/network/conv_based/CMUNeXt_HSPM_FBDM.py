@@ -147,9 +147,13 @@ class FBDM(nn.Module):
 
         gate_ratio = float(gate_init) / self.gate_max
         self.gamma_raw = nn.Parameter(torch.tensor(_inverse_sigmoid(gate_ratio), dtype=torch.float32))
+        self.residual_scale = 1.0
 
     def effective_gamma(self):
-        return self.gate_max * torch.sigmoid(self.gamma_raw)
+        return self.gate_max * torch.sigmoid(self.gamma_raw) * self.residual_scale
+
+    def set_residual_scale(self, scale):
+        self.residual_scale = min(max(float(scale), 0.0), 1.0)
 
     def build_boundary_prior(self, x, coarse_logits=None, uncertainty=None):
         edge_prior = self.sobel_edge(x)

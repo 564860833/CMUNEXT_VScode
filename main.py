@@ -57,6 +57,7 @@ from src.network.hybrid_based.Mobile_U_ViT import mobileuvit, mobileuvit_l
 APBR_MODELS = {"CMUNeXt_HSPM_APBR", "CMUNeXt_HSPM_APBR_V2"}
 HSPM_FBDM_MODELS = {"CMUNeXt_HSPM_FBDM"}
 FBDM_ONLY_MODELS = {"CMUNeXt_FBDM"}
+FBDM_MODELS = {*HSPM_FBDM_MODELS, *FBDM_ONLY_MODELS}
 SDFR_V2_MODELS = {"CMUNeXt_HSPM_SDFR_V2"}
 SDFR_MODELS = {"CMUNeXt_HSPM_SDFR", *SDFR_V2_MODELS}
 HSPM_MODELS = {"CMUNeXt_HSPM", *HSPM_FBDM_MODELS, *APBR_MODELS, *SDFR_MODELS}
@@ -281,8 +282,14 @@ parser.add_argument('--fbdm_gate_max', type=float, default=0.2,
                     help='Maximum effective FBDM residual strength')
 parser.add_argument('--fbdm_edge_loss_weight', type=float, default=0.05,
                     help='Auxiliary edge loss weight for FBDM models')
+parser.add_argument('--fbdm_edge_loss_final_weight', type=float, default=None,
+                    help='Final FBDM edge loss weight; defaults to the initial weight')
+parser.add_argument('--fbdm_edge_loss_decay_epochs', type=int, default=0,
+                    help='Epochs used to linearly decay the FBDM edge loss weight')
 parser.add_argument('--fbdm_edge_kernel_size', type=int, default=3,
                     help='Odd kernel size used to build edge supervision masks for FBDM models')
+parser.add_argument('--fbdm_residual_warmup_epochs', type=int, default=0,
+                    help='Epochs used to linearly warm up FBDM residual injection')
 parser.add_argument('--early_stop_patience', type=int, default=0,
                     help='Stop after this many epochs without a significant validation IoU improvement; 0 disables')
 parser.add_argument('--early_stop_min_delta', type=float, default=0.001,
@@ -662,6 +669,7 @@ def compute_loss(
     label_batch,
     sampled_batch=None,
     aux_weight=None,
+    edge_weight=None,
     sdf_weight=None,
     band_weight=None,
 ):
@@ -694,9 +702,15 @@ def compute_loss(
             return_components=True,
         )
     if args.model in HSPM_FBDM_MODELS:
-        return criterion(outputs, label_batch, coarse_weight=aux_weight)
+        return criterion(
+            outputs,
+            label_batch,
+            coarse_weight=aux_weight,
+            edge_weight=edge_weight,
+            return_components=True,
+        )
     if args.model in FBDM_ONLY_MODELS:
-        return criterion(outputs, label_batch)
+        return criterion(outputs, label_batch, edge_weight=edge_weight, return_components=True)
     if args.model == "CMUNeXt_HSPM":
         return criterion(outputs, label_batch, coarse_weight=aux_weight)
     return criterion(outputs, label_batch)
@@ -723,6 +737,28 @@ def get_apbr_coarse_weight(args, epoch_num):
         return initial_weight
     progress = min(max(float(epoch_num) / decay_epochs, 0.0), 1.0)
     return initial_weight + progress * (final_weight - initial_weight)
+
+
+def get_fbdm_edge_weight(args, epoch_num):
+    initial_weight = float(args.fbdm_edge_loss_weight)
+    final_weight = args.fbdm_edge_loss_final_weight
+    if final_weight is None:
+        final_weight = initial_weight
+    final_weight = float(final_weight)
+    decay_epochs = int(args.fbdm_edge_loss_decay_epochs)
+    if decay_epochs <= 0:
+        return initial_weight
+    progress = min(max(float(epoch_num) / decay_epochs, 0.0), 1.0)
+    return initial_weight + progress * (final_weight - initial_weight)
+
+
+def get_fbdm_residual_scale(args, epoch_num):
+    if args.model not in FBDM_MODELS:
+        return 1.0
+    warmup_epochs = int(args.fbdm_residual_warmup_epochs)
+    if warmup_epochs <= 0:
+        return 1.0
+    return min(max(float(epoch_num) / warmup_epochs, 0.0), 1.0)
 
 
 def get_apbr_route_scale(args, epoch_num):
@@ -840,6 +876,17 @@ def configure_hspm_epoch(args, model, epoch_num):
         if args.hspm_mixer_mode == "stable":
             effective_gamma *= prototype_scale
     return coarse_weight, prototype_scale, effective_gamma
+
+
+def configure_fbdm_epoch(args, model, epoch_num):
+    edge_weight = get_fbdm_edge_weight(args, epoch_num) if args.model in FBDM_MODELS else 0.0
+    residual_scale = get_fbdm_residual_scale(args, epoch_num)
+    effective_gamma = None
+    if args.model in FBDM_MODELS:
+        fbdm_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+        fbdm_model.fbdm1.set_residual_scale(residual_scale)
+        effective_gamma = float(fbdm_model.fbdm1.effective_gamma().detach().cpu())
+    return edge_weight, residual_scale, effective_gamma
 
 
 def get_hspm_fusion_diagnostics(model):
@@ -1003,6 +1050,10 @@ def main(args):
         raise ValueError("fbdm_gate_init must be in (0, fbdm_gate_max).")
     if args.fbdm_edge_loss_weight < 0:
         raise ValueError("fbdm_edge_loss_weight must be non-negative.")
+    if args.fbdm_edge_loss_final_weight is not None and args.fbdm_edge_loss_final_weight < 0:
+        raise ValueError("fbdm_edge_loss_final_weight must be non-negative.")
+    if args.fbdm_edge_loss_decay_epochs < 0 or args.fbdm_residual_warmup_epochs < 0:
+        raise ValueError("FBDM schedule epochs must be non-negative.")
     if args.fbdm_edge_kernel_size <= 0 or args.fbdm_edge_kernel_size % 2 == 0:
         raise ValueError("fbdm_edge_kernel_size must be a positive odd integer.")
     if args.apbr_coarse_loss_weight < 0 or args.apbr_coarse_loss_final_weight < 0:
@@ -1120,6 +1171,11 @@ def main(args):
 
     for epoch_num in range(max_epoch):
         current_coarse_weight, prototype_scale, effective_gamma = configure_hspm_epoch(args, model, epoch_num)
+        current_edge_weight, fbdm_residual_scale, effective_fbdm_gamma = configure_fbdm_epoch(
+            args,
+            model,
+            epoch_num,
+        )
         current_sdfr_sdf_weight = (
             get_sdfr_sdf_weight(args, epoch_num)
             if args.model in SDFR_MODELS
@@ -1181,6 +1237,13 @@ def main(args):
                     "effective_logit_scale",
                 ):
                     avg_meters[f"apbr_{stage_name}_{diagnostic_name}"] = AverageMeter()
+        if args.model in FBDM_MODELS:
+            component_names = ["seg", "edge_weighted", "total"]
+            if args.model in HSPM_FBDM_MODELS:
+                component_names.insert(1, "coarse_weighted")
+            for prefix in ("train", "val"):
+                for component_name in component_names:
+                    avg_meters[f"{prefix}_loss_{component_name}"] = AverageMeter()
         if args.model in USLGSF_V3_MODELS:
             for stage in args.uslgsf_stages:
                 for diagnostic_name in USLGSF_V3_DIAGNOSTIC_NAMES:
@@ -1238,6 +1301,7 @@ def main(args):
                 label_batch,
                 sampled_batch,
                 aux_weight=current_coarse_weight,
+                edge_weight=current_edge_weight,
                 sdf_weight=current_sdfr_sdf_weight,
                 band_weight=current_sdfr_v2_band_weight,
             )
@@ -1333,6 +1397,7 @@ def main(args):
                     label_batch,
                     sampled_batch,
                     aux_weight=current_coarse_weight,
+                    edge_weight=current_edge_weight,
                     sdf_weight=current_sdfr_sdf_weight,
                     band_weight=current_sdfr_v2_band_weight,
                 )
@@ -1566,6 +1631,38 @@ def main(args):
                         avg_meters["val_loss_sdf_weighted"].avg,
                         avg_meters["val_loss_total"].avg,
                     )
+        if args.model in FBDM_MODELS:
+            logging.info(
+                "FBDM schedule: edge_weight=%.4f - residual_scale=%.4f - effective_gamma=%.4f",
+                current_edge_weight,
+                fbdm_residual_scale,
+                effective_fbdm_gamma,
+            )
+            if args.model in HSPM_FBDM_MODELS:
+                logging.info(
+                    "FBDM loss components: train(seg=%.6f - coarse=%.6f"
+                    " - edge=%.6f - total=%.6f) - val(seg=%.6f - coarse=%.6f"
+                    " - edge=%.6f - total=%.6f)",
+                    avg_meters["train_loss_seg"].avg,
+                    avg_meters["train_loss_coarse_weighted"].avg,
+                    avg_meters["train_loss_edge_weighted"].avg,
+                    avg_meters["train_loss_total"].avg,
+                    avg_meters["val_loss_seg"].avg,
+                    avg_meters["val_loss_coarse_weighted"].avg,
+                    avg_meters["val_loss_edge_weighted"].avg,
+                    avg_meters["val_loss_total"].avg,
+                )
+            else:
+                logging.info(
+                    "FBDM loss components: train(seg=%.6f - edge=%.6f"
+                    " - total=%.6f) - val(seg=%.6f - edge=%.6f - total=%.6f)",
+                    avg_meters["train_loss_seg"].avg,
+                    avg_meters["train_loss_edge_weighted"].avg,
+                    avg_meters["train_loss_total"].avg,
+                    avg_meters["val_loss_seg"].avg,
+                    avg_meters["val_loss_edge_weighted"].avg,
+                    avg_meters["val_loss_total"].avg,
+                )
         if args.model in USLGSF_V3_MODELS:
             for stage in args.uslgsf_stages:
                 logging.info(
