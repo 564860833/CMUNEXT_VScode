@@ -14,6 +14,7 @@ from src.utils.metrics import iou_score, boundary_scores, find_best_threshold
 from src.network.conv_based.AttU_Net import AttU_Net
 from src.network.conv_based.CMUNet import CMUNet
 from src.network.conv_based.CMUNeXt import cmunext
+from src.network.conv_based.CMUNeXt_FBDM import cmunext_fbdm
 from src.network.conv_based.CMUNeXt_USLGSF import cmunext_uslgsf
 from src.network.conv_based.CMUNeXt_USLGSF_V2 import cmunext_uslgsf_v2
 from src.network.conv_based.CMUNeXt_USLGSF_V3 import cmunext_uslgsf_v3
@@ -39,10 +40,11 @@ from src.network.transfomer_based.transformer_based_network import get_transform
 
 
 APBR_MODELS = {"CMUNeXt_HSPM_APBR", "CMUNeXt_HSPM_APBR_V2"}
-FBDM_MODELS = {"CMUNeXt_HSPM_FBDM"}
+HSPM_FBDM_MODELS = {"CMUNeXt_HSPM_FBDM"}
+FBDM_ONLY_MODELS = {"CMUNeXt_FBDM"}
 SDFR_V2_MODELS = {"CMUNeXt_HSPM_SDFR_V2"}
 SDFR_MODELS = {"CMUNeXt_HSPM_SDFR", *SDFR_V2_MODELS}
-HSPM_MODELS = {"CMUNeXt_HSPM", *FBDM_MODELS, *APBR_MODELS, *SDFR_MODELS}
+HSPM_MODELS = {"CMUNeXt_HSPM", *HSPM_FBDM_MODELS, *APBR_MODELS, *SDFR_MODELS}
 
 
 def parse_gag_stages(value):
@@ -144,6 +146,12 @@ def build_model(args, parser):
         model = MK_UNet(num_classes=args.num_classes, in_channels=3)
     elif args.model == "CMUNeXt":
         model = cmunext(num_classes=args.num_classes)
+    elif args.model == "CMUNeXt_FBDM":
+        model = cmunext_fbdm(
+            num_classes=args.num_classes,
+            fbdm_gate_init=args.fbdm_gate_init,
+            fbdm_gate_max=args.fbdm_gate_max,
+        )
     elif args.model == "CMUNeXt_USLGSF":
         model = cmunext_uslgsf(
             num_classes=args.num_classes,
@@ -604,6 +612,8 @@ def validate(model, val_loader, criterion, device, args, save_dir="validation_re
                 )
             elif args.model in {*HSPM_MODELS, "CMUNeXt_HSPM_UBRD"}:
                 loss = criterion(outputs, label_batch)
+            elif args.model in FBDM_ONLY_MODELS:
+                loss = criterion(outputs, label_batch)
             else:
                 loss = criterion(seg_logits, label_batch)
             probabilities = torch.sigmoid(seg_logits).detach().cpu()
@@ -694,7 +704,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Validation script for medical image segmentation")
 
     model_choices = [
-        "CMUNet", "CMUNeXt", "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", "CMUNeXt_HSPM_FBDM", "CMUNeXt_HSPM_APBR",
+        "CMUNet", "CMUNeXt", "CMUNeXt_FBDM", "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", "CMUNeXt_HSPM_FBDM", "CMUNeXt_HSPM_APBR",
         "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_SDFR", "CMUNeXt_HSPM_SDFR_V2",
         "CMUNeXt_HSPM_UBRD",
         "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
@@ -791,9 +801,9 @@ if __name__ == "__main__":
     parser.add_argument("--fbdm_gate_max", type=float, default=0.2,
                         help="Maximum effective FBDM residual strength")
     parser.add_argument("--fbdm_edge_loss_weight", type=float, default=0.05,
-                        help="Auxiliary edge loss weight for CMUNeXt_HSPM_FBDM")
+                        help="Auxiliary edge loss weight for FBDM models")
     parser.add_argument("--fbdm_edge_kernel_size", type=int, default=3,
-                        help="Odd kernel size used to build edge supervision masks for CMUNeXt_HSPM_FBDM")
+                        help="Odd kernel size used to build edge supervision masks for FBDM models")
     parser.add_argument("--early_stop_patience", type=int, default=0,
                         help="Training-only compatibility option")
     parser.add_argument("--early_stop_min_delta", type=float, default=0.001,
@@ -926,9 +936,14 @@ if __name__ == "__main__":
             coarse_weight=args.hspm_coarse_loss_weight,
             boundary_weight=args.ubrd_boundary_loss_weight,
         ).to(device)
-    elif args.model in FBDM_MODELS:
+    elif args.model in HSPM_FBDM_MODELS:
         criterion = losses.__dict__["HSPMFBDMLoss"](
             coarse_weight=args.hspm_coarse_loss_weight,
+            edge_weight=args.fbdm_edge_loss_weight,
+            edge_kernel_size=args.fbdm_edge_kernel_size,
+        ).to(device)
+    elif args.model in FBDM_ONLY_MODELS:
+        criterion = losses.__dict__["FBDMLoss"](
             edge_weight=args.fbdm_edge_loss_weight,
             edge_kernel_size=args.fbdm_edge_kernel_size,
         ).to(device)

@@ -9,6 +9,7 @@ __all__ = [
     'SobelBoundaryLoss',
     'BoundaryAwareSegLoss',
     'HSPMLoss',
+    'FBDMLoss',
     'HSPMFBDMLoss',
     'mask_to_edge',
     'UBRDLoss',
@@ -190,6 +191,45 @@ class HSPMFBDMLoss(nn.Module):
         return total, {
             "seg": seg,
             "coarse_weighted": coarse_weighted,
+            "edge_weighted": edge_weighted,
+            "total": total,
+        }
+
+
+class FBDMLoss(nn.Module):
+    def __init__(self, edge_weight=0.05, edge_kernel_size=3):
+        super().__init__()
+        if edge_weight < 0:
+            raise ValueError("edge_weight must be non-negative.")
+        self.edge_weight = float(edge_weight)
+        self.edge_kernel_size = int(edge_kernel_size)
+        self.seg_loss = BCEDiceLoss()
+
+    def forward(self, outputs, target, edge_weight=None, return_components=False):
+        if not isinstance(outputs, dict):
+            raise TypeError("FBDMLoss expects model outputs to be a dictionary.")
+        if "seg" not in outputs:
+            raise KeyError("FBDMLoss requires a 'seg' output key.")
+
+        current_edge_weight = self.edge_weight if edge_weight is None else float(edge_weight)
+        if current_edge_weight < 0:
+            raise ValueError("edge_weight must be non-negative.")
+
+        seg = self.seg_loss(outputs["seg"], target)
+        edge_weighted = seg.new_zeros(())
+        if current_edge_weight > 0:
+            if "edge" not in outputs:
+                raise KeyError("FBDMLoss requires an 'edge' output key when edge_weight > 0.")
+            edge_target = mask_to_edge(target, kernel_size=self.edge_kernel_size)
+            if edge_target.shape[-2:] != outputs["edge"].shape[-2:]:
+                edge_target = F.interpolate(edge_target, size=outputs["edge"].shape[-2:], mode="nearest")
+            edge_weighted = current_edge_weight * self.seg_loss(outputs["edge"], edge_target)
+
+        total = seg + edge_weighted
+        if not return_components:
+            return total
+        return total, {
+            "seg": seg,
             "edge_weighted": edge_weighted,
             "total": total,
         }

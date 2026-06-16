@@ -29,6 +29,7 @@ from src.network.conv_based.UNeXt import UNext
 from src.network.conv_based.UNetplus import ResNet34UnetPlus
 from src.network.conv_based.UNet3plus import UNet3plus
 from src.network.conv_based.CMUNeXt import cmunext
+from src.network.conv_based.CMUNeXt_FBDM import cmunext_fbdm
 from src.network.conv_based.CMUNeXt_USLGSF import cmunext_uslgsf
 from src.network.conv_based.CMUNeXt_USLGSF_V2 import cmunext_uslgsf_v2
 from src.network.conv_based.CMUNeXt_USLGSF_V3 import cmunext_uslgsf_v3
@@ -54,10 +55,11 @@ from src.network.hybrid_based.Mobile_U_ViT import mobileuvit, mobileuvit_l
 
 
 APBR_MODELS = {"CMUNeXt_HSPM_APBR", "CMUNeXt_HSPM_APBR_V2"}
-FBDM_MODELS = {"CMUNeXt_HSPM_FBDM"}
+HSPM_FBDM_MODELS = {"CMUNeXt_HSPM_FBDM"}
+FBDM_ONLY_MODELS = {"CMUNeXt_FBDM"}
 SDFR_V2_MODELS = {"CMUNeXt_HSPM_SDFR_V2"}
 SDFR_MODELS = {"CMUNeXt_HSPM_SDFR", *SDFR_V2_MODELS}
-HSPM_MODELS = {"CMUNeXt_HSPM", *FBDM_MODELS, *APBR_MODELS, *SDFR_MODELS}
+HSPM_MODELS = {"CMUNeXt_HSPM", *HSPM_FBDM_MODELS, *APBR_MODELS, *SDFR_MODELS}
 USLGSF_V3_MODELS = {"CMUNeXt_USLGSF_V3"}
 USLGSF_V3_DIAGNOSTIC_NAMES = (
     "structure_reliability_mean",
@@ -178,7 +180,7 @@ def parse_gag_stages(value):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default="CMUNeXt",
-                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", "CMUNeXt_HSPM_FBDM", "CMUNeXt_HSPM_APBR",
+                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_FBDM", "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", "CMUNeXt_HSPM_FBDM", "CMUNeXt_HSPM_APBR",
                              "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_SDFR",
                              "CMUNeXt_HSPM_SDFR_V2", "CMUNeXt_HSPM_UBRD",
                              "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
@@ -278,9 +280,9 @@ parser.add_argument('--fbdm_gate_init', type=float, default=0.03,
 parser.add_argument('--fbdm_gate_max', type=float, default=0.2,
                     help='Maximum effective FBDM residual strength')
 parser.add_argument('--fbdm_edge_loss_weight', type=float, default=0.05,
-                    help='Auxiliary edge loss weight for CMUNeXt_HSPM_FBDM')
+                    help='Auxiliary edge loss weight for FBDM models')
 parser.add_argument('--fbdm_edge_kernel_size', type=int, default=3,
-                    help='Odd kernel size used to build edge supervision masks for CMUNeXt_HSPM_FBDM')
+                    help='Odd kernel size used to build edge supervision masks for FBDM models')
 parser.add_argument('--early_stop_patience', type=int, default=0,
                     help='Stop after this many epochs without a significant validation IoU improvement; 0 disables')
 parser.add_argument('--early_stop_min_delta', type=float, default=0.001,
@@ -357,6 +359,12 @@ def get_model(args):
         model = MK_UNet(num_classes=args.num_classes, in_channels=3).cuda()
     elif args.model == "CMUNeXt":
         model = cmunext(num_classes=args.num_classes).cuda()
+    elif args.model == "CMUNeXt_FBDM":
+        model = cmunext_fbdm(
+            num_classes=args.num_classes,
+            fbdm_gate_init=args.fbdm_gate_init,
+            fbdm_gate_max=args.fbdm_gate_max,
+        ).cuda()
     elif args.model == "CMUNeXt_USLGSF":
         model = cmunext_uslgsf(
             num_classes=args.num_classes,
@@ -580,9 +588,14 @@ def get_criterion(args):
             coarse_weight=args.hspm_coarse_loss_weight,
             boundary_weight=args.ubrd_boundary_loss_weight,
         ).cuda()
-    if args.model in FBDM_MODELS:
+    if args.model in HSPM_FBDM_MODELS:
         return losses.__dict__['HSPMFBDMLoss'](
             coarse_weight=args.hspm_coarse_loss_weight,
+            edge_weight=args.fbdm_edge_loss_weight,
+            edge_kernel_size=args.fbdm_edge_kernel_size,
+        ).cuda()
+    if args.model in FBDM_ONLY_MODELS:
+        return losses.__dict__['FBDMLoss'](
             edge_weight=args.fbdm_edge_loss_weight,
             edge_kernel_size=args.fbdm_edge_kernel_size,
         ).cuda()
@@ -680,8 +693,10 @@ def compute_loss(
             coarse_weight=aux_weight,
             return_components=True,
         )
-    if args.model in FBDM_MODELS:
+    if args.model in HSPM_FBDM_MODELS:
         return criterion(outputs, label_batch, coarse_weight=aux_weight)
+    if args.model in FBDM_ONLY_MODELS:
+        return criterion(outputs, label_batch)
     if args.model == "CMUNeXt_HSPM":
         return criterion(outputs, label_batch, coarse_weight=aux_weight)
     return criterion(outputs, label_batch)
