@@ -34,7 +34,7 @@ from src.network.conv_based.CMUNeXt_USLGSF import cmunext_uslgsf
 from src.network.conv_based.CMUNeXt_USLGSF_V2 import cmunext_uslgsf_v2
 from src.network.conv_based.CMUNeXt_USLGSF_V3 import cmunext_uslgsf_v3
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
-from src.network.conv_based.CMUNeXt_HSPM_FBDM import cmunext_hspm_fbdm
+from src.network.conv_based.CMUNeXt_HSPM_FBDM import cmunext_hspm_fbdm, cmunext_hspm_fbdm_v2
 from src.network.conv_based.CMUNeXt_HSPM_APBR import cmunext_hspm_apbr
 from src.network.conv_based.CMUNeXt_HSPM_APBR_V2 import cmunext_hspm_apbr_v2
 from src.network.conv_based.CMUNeXt_HSPM_SDFR import cmunext_hspm_sdfr
@@ -55,7 +55,8 @@ from src.network.hybrid_based.Mobile_U_ViT import mobileuvit, mobileuvit_l
 
 
 APBR_MODELS = {"CMUNeXt_HSPM_APBR", "CMUNeXt_HSPM_APBR_V2"}
-HSPM_FBDM_MODELS = {"CMUNeXt_HSPM_FBDM"}
+HSPM_FBDM_V2_MODELS = {"CMUNeXt_HSPM_FBDM_V2"}
+HSPM_FBDM_MODELS = {"CMUNeXt_HSPM_FBDM", *HSPM_FBDM_V2_MODELS}
 FBDM_ONLY_MODELS = {"CMUNeXt_FBDM"}
 FBDM_MODELS = {*HSPM_FBDM_MODELS, *FBDM_ONLY_MODELS}
 SDFR_V2_MODELS = {"CMUNeXt_HSPM_SDFR_V2"}
@@ -72,6 +73,15 @@ USLGSF_V3_DIAGNOSTIC_NAMES = (
     "effective_alpha",
     "residual_delta_abs_mean",
     "injection_encoder_rms_ratio",
+)
+FBDM_V2_DIAGNOSTIC_NAMES = (
+    "correction_schedule_scale",
+    "effective_correction_scale",
+    "boundary_gate_mean",
+    "boundary_gate_over_05",
+    "logit_correction_abs_mean",
+    "logit_correction_abs_max",
+    "prediction_flip_ratio",
 )
 
 
@@ -181,7 +191,7 @@ def parse_gag_stages(value):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default="CMUNeXt",
-                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_FBDM", "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", "CMUNeXt_HSPM_FBDM", "CMUNeXt_HSPM_APBR",
+                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_FBDM", "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", "CMUNeXt_HSPM_FBDM", "CMUNeXt_HSPM_FBDM_V2", "CMUNeXt_HSPM_APBR",
                              "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_SDFR",
                              "CMUNeXt_HSPM_SDFR_V2", "CMUNeXt_HSPM_UBRD",
                              "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
@@ -292,6 +302,12 @@ parser.add_argument('--fbdm_edge_kernel_size', type=int, default=3,
                     help='Odd kernel size used to build edge supervision masks for FBDM models')
 parser.add_argument('--fbdm_residual_warmup_epochs', type=int, default=0,
                     help='Epochs used to linearly warm up FBDM residual injection')
+parser.add_argument('--fbdm_correction_scale_init', type=float, default=0.05,
+                    help='Initial effective bounded logit-correction scale for FBDM V2')
+parser.add_argument('--fbdm_correction_scale_max', type=float, default=0.3,
+                    help='Maximum effective bounded logit-correction scale for FBDM V2')
+parser.add_argument('--fbdm_correction_warmup_epochs', type=int, default=40,
+                    help='Epochs used to linearly warm up FBDM V2 logit correction')
 parser.add_argument('--early_stop_patience', type=int, default=0,
                     help='Stop after this many epochs without a significant validation IoU improvement; 0 disables')
 parser.add_argument('--early_stop_min_delta', type=float, default=0.001,
@@ -445,6 +461,31 @@ def get_model(args):
             fbdm_gate_init=args.fbdm_gate_init,
             fbdm_gate_max=args.fbdm_gate_max,
             fbdm_edge_aux_only=args.fbdm_edge_aux_only,
+        ).cuda()
+    elif args.model == "CMUNeXt_HSPM_FBDM_V2":
+        model = cmunext_hspm_fbdm_v2(
+            num_classes=args.num_classes,
+            hspm_mode=args.hspm_mode,
+            hspm_mixer_mode=args.hspm_mixer_mode,
+            hspm_gamma_init=args.hspm_gamma_init,
+            hspm_gamma_max=args.hspm_gamma_max,
+            hspm_temperature=args.hspm_temperature,
+            hspm_prototype_dropout=args.hspm_prototype_dropout,
+            hspm_backbone_mode=args.hspm_backbone_mode,
+            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
+            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
+            hspm_fusion_mode=args.hspm_fusion_mode,
+            hspm_small_area_threshold=args.hspm_small_area_threshold,
+            hspm_small_area_temperature=args.hspm_small_area_temperature,
+            fbdm_use_hspm_prior=not args.fbdm_no_hspm_prior,
+            fbdm_detach_hspm_prior=not args.fbdm_no_detach_hspm_prior,
+            fbdm_semantic_uncertainty_weight=args.fbdm_semantic_uncertainty_weight,
+            fbdm_semantic_coarse_weight=args.fbdm_semantic_coarse_weight,
+            fbdm_semantic_gate_base=args.fbdm_semantic_gate_base,
+            fbdm_gate_init=args.fbdm_gate_init,
+            fbdm_gate_max=args.fbdm_gate_max,
+            fbdm_correction_scale_init=args.fbdm_correction_scale_init,
+            fbdm_correction_scale_max=args.fbdm_correction_scale_max,
         ).cuda()
     elif args.model == "CMUNeXt_HSPM_APBR":
         model = cmunext_hspm_apbr(
@@ -765,6 +806,15 @@ def get_fbdm_residual_scale(args, epoch_num):
     return min(max(float(epoch_num) / warmup_epochs, 0.0), 1.0)
 
 
+def get_fbdm_correction_schedule_scale(args, epoch_num):
+    if args.model not in HSPM_FBDM_V2_MODELS:
+        return 1.0
+    warmup_epochs = int(args.fbdm_correction_warmup_epochs)
+    if warmup_epochs <= 0:
+        return 1.0
+    return min(max(float(epoch_num) / warmup_epochs, 0.0), 1.0)
+
+
 def get_apbr_route_scale(args, epoch_num):
     warmup_epochs = int(getattr(args, "apbr_route_warmup_epochs", 30))
     if warmup_epochs <= 0:
@@ -889,6 +939,10 @@ def configure_fbdm_epoch(args, model, epoch_num):
     if args.model in FBDM_MODELS:
         fbdm_model = model.module if isinstance(model, torch.nn.DataParallel) else model
         fbdm_model.fbdm1.set_residual_scale(residual_scale)
+        if args.model in HSPM_FBDM_V2_MODELS:
+            fbdm_model.set_fbdm_correction_schedule_scale(
+                get_fbdm_correction_schedule_scale(args, epoch_num)
+            )
         effective_gamma = float(fbdm_model.fbdm1.effective_gamma().detach().cpu())
     return edge_weight, residual_scale, effective_gamma
 
@@ -918,6 +972,17 @@ def get_apbr_diagnostics(model):
 def get_sdfr_diagnostics(model):
     sdfr_model = model.module if isinstance(model, torch.nn.DataParallel) else model
     diagnostics = sdfr_model.get_sdfr_diagnostics()
+    if diagnostics is None:
+        return None
+    return {
+        name: float(value.detach().cpu())
+        for name, value in diagnostics.items()
+    }
+
+
+def get_fbdm_v2_diagnostics(model):
+    fbdm_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+    diagnostics = fbdm_model.get_fbdm_v2_diagnostics()
     if diagnostics is None:
         return None
     return {
@@ -1058,6 +1123,10 @@ def main(args):
         raise ValueError("fbdm_edge_loss_final_weight must be non-negative.")
     if args.fbdm_edge_loss_decay_epochs < 0 or args.fbdm_residual_warmup_epochs < 0:
         raise ValueError("FBDM schedule epochs must be non-negative.")
+    if not 0.0 < args.fbdm_correction_scale_init < args.fbdm_correction_scale_max:
+        raise ValueError("FBDM V2 correction scale init must be in (0, correction scale max).")
+    if args.fbdm_correction_warmup_epochs < 0:
+        raise ValueError("FBDM V2 correction warmup epochs must be non-negative.")
     if args.fbdm_edge_kernel_size <= 0 or args.fbdm_edge_kernel_size % 2 == 0:
         raise ValueError("fbdm_edge_kernel_size must be a positive odd integer.")
     if args.apbr_coarse_loss_weight < 0 or args.apbr_coarse_loss_final_weight < 0:
@@ -1248,6 +1317,9 @@ def main(args):
             for prefix in ("train", "val"):
                 for component_name in component_names:
                     avg_meters[f"{prefix}_loss_{component_name}"] = AverageMeter()
+            if args.model in HSPM_FBDM_V2_MODELS:
+                for diagnostic_name in FBDM_V2_DIAGNOSTIC_NAMES:
+                    avg_meters[f"fbdm_v2_{diagnostic_name}"] = AverageMeter()
         if args.model in USLGSF_V3_MODELS:
             for stage in args.uslgsf_stages:
                 for diagnostic_name in USLGSF_V3_DIAGNOSTIC_NAMES:
@@ -1391,6 +1463,14 @@ def main(args):
                     if sdfr_diagnostics is not None:
                         for diagnostic_name, diagnostic_value in sdfr_diagnostics.items():
                             avg_meters[f"sdfr_{diagnostic_name}"].update(
+                                diagnostic_value,
+                                img_batch.size(0),
+                            )
+                if args.model in HSPM_FBDM_V2_MODELS:
+                    fbdm_v2_diagnostics = get_fbdm_v2_diagnostics(model)
+                    if fbdm_v2_diagnostics is not None:
+                        for diagnostic_name, diagnostic_value in fbdm_v2_diagnostics.items():
+                            avg_meters[f"fbdm_v2_{diagnostic_name}"].update(
                                 diagnostic_value,
                                 img_batch.size(0),
                             )
@@ -1666,6 +1746,20 @@ def main(args):
                     avg_meters["val_loss_seg"].avg,
                     avg_meters["val_loss_edge_weighted"].avg,
                     avg_meters["val_loss_total"].avg,
+                )
+            if args.model in HSPM_FBDM_V2_MODELS:
+                logging.info(
+                    "FBDM-v2 correction: schedule=%.4f - scale=%.6f"
+                    " - boundary_gate_mean=%.6f - boundary_gate>0.5=%.6f"
+                    " - logit_correction_mean=%.6f - logit_correction_max=%.6f"
+                    " - prediction_flip_ratio=%.6f",
+                    avg_meters["fbdm_v2_correction_schedule_scale"].avg,
+                    avg_meters["fbdm_v2_effective_correction_scale"].avg,
+                    avg_meters["fbdm_v2_boundary_gate_mean"].avg,
+                    avg_meters["fbdm_v2_boundary_gate_over_05"].avg,
+                    avg_meters["fbdm_v2_logit_correction_abs_mean"].avg,
+                    avg_meters["fbdm_v2_logit_correction_abs_max"].avg,
+                    avg_meters["fbdm_v2_prediction_flip_ratio"].avg,
                 )
         if args.model in USLGSF_V3_MODELS:
             for stage in args.uslgsf_stages:

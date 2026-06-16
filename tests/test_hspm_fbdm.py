@@ -4,8 +4,10 @@ import torch
 
 from src.network.conv_based.CMUNeXt_HSPM_FBDM import (
     FBDM,
+    FBDMLogitCorrection,
     FixedHaarDWT,
     cmunext_hspm_fbdm,
+    cmunext_hspm_fbdm_v2,
 )
 from src.utils.losses import HSPMFBDMLoss, mask_to_edge
 
@@ -13,6 +15,14 @@ from src.utils.losses import HSPMFBDMLoss, mask_to_edge
 class HSPMFBDMTests(unittest.TestCase):
     def _small_model(self, **kwargs):
         return cmunext_hspm_fbdm(
+            dims=(4, 8, 16, 20, 24),
+            depths=(1, 1, 1, 1, 1),
+            kernels=(3, 3, 3, 3, 3),
+            **kwargs,
+        )
+
+    def _small_v2_model(self, **kwargs):
+        return cmunext_hspm_fbdm_v2(
             dims=(4, 8, 16, 20, 24),
             depths=(1, 1, 1, 1, 1),
             kernels=(3, 3, 3, 3, 3),
@@ -63,6 +73,74 @@ class HSPMFBDMTests(unittest.TestCase):
         self.assertEqual(set(outputs), {"seg", "coarse", "uncertainty", "edge"})
         self.assertEqual(outputs["seg"].shape, (2, 1, 32, 32))
         self.assertEqual(outputs["edge"].shape, (2, 1, 32, 32))
+
+    def test_fbdm_logit_correction_is_bounded(self):
+        correction = FBDMLogitCorrection(
+            channels=4,
+            correction_scale_init=0.05,
+            correction_scale_max=0.3,
+        ).eval()
+        correction.set_schedule_scale(0.5)
+        with torch.no_grad():
+            correction.correction_head.bias.fill_(10.0)
+
+        feature = torch.randn(2, 4, 16, 16)
+        base_logits = torch.randn(2, 1, 16, 16, requires_grad=True)
+        edge_logits = torch.randn(2, 1, 16, 16, requires_grad=True)
+        boundary_gate = torch.rand(2, 1, 16, 16)
+
+        final_logits, logit_correction = correction(
+            feature,
+            base_logits,
+            edge_logits,
+            boundary_gate,
+        )
+
+        bound = correction.schedule_scale * correction.effective_correction_scale()
+        self.assertLessEqual(logit_correction.abs().max().item(), bound.item() + 1e-6)
+        self.assertEqual(final_logits.shape, base_logits.shape)
+
+    def test_hspm_fbdm_v2_output_contract_and_zero_correction(self):
+        model = self._small_v2_model().eval()
+        with torch.no_grad():
+            outputs = model(torch.randn(2, 3, 32, 32))
+
+        self.assertEqual(
+            set(outputs),
+            {"seg", "base_seg", "coarse", "uncertainty", "edge", "logit_correction"},
+        )
+        self.assertTrue(model.fbdm1.edge_aux_only)
+        self.assertEqual(outputs["seg"].shape, (2, 1, 32, 32))
+        self.assertEqual(outputs["base_seg"].shape, (2, 1, 32, 32))
+        self.assertEqual(outputs["edge"].shape, (2, 1, 32, 32))
+        self.assertTrue(torch.allclose(outputs["seg"], outputs["base_seg"]))
+        self.assertTrue(torch.allclose(outputs["logit_correction"], torch.zeros_like(outputs["seg"])))
+
+    def test_hspm_fbdm_v2_can_disable_hspm_prior(self):
+        model = self._small_v2_model(fbdm_use_hspm_prior=False).eval()
+        with torch.no_grad():
+            outputs = model(torch.randn(2, 3, 32, 32))
+
+        self.assertFalse(model.fbdm1.use_hspm_prior)
+        self.assertEqual(outputs["seg"].shape, (2, 1, 32, 32))
+
+    def test_hspm_fbdm_v2_loss_backward(self):
+        model = self._small_v2_model().eval()
+        target = torch.zeros(2, 1, 32, 32)
+        target[:, :, 8:24, 10:22] = 1.0
+
+        outputs = model(torch.randn(2, 3, 32, 32))
+        total, components = HSPMFBDMLoss(
+            coarse_weight=0.1,
+            edge_weight=0.03,
+        )(outputs, target, return_components=True)
+
+        self.assertTrue(torch.isfinite(total))
+        self.assertIn("edge_weighted", components)
+        total.backward()
+        self.assertIsNotNone(model.Conv_1x1.weight.grad)
+        self.assertIsNotNone(model.fbdm1.edge_head.weight.grad)
+        self.assertIsNotNone(model.fbdm_correction.correction_head.weight.grad)
 
     def test_dual_path_size_aware_fusion_diagnostics_are_preserved(self):
         model = self._small_model(

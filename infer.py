@@ -19,7 +19,7 @@ from src.network.conv_based.CMUNeXt_USLGSF import cmunext_uslgsf
 from src.network.conv_based.CMUNeXt_USLGSF_V2 import cmunext_uslgsf_v2
 from src.network.conv_based.CMUNeXt_USLGSF_V3 import cmunext_uslgsf_v3
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
-from src.network.conv_based.CMUNeXt_HSPM_FBDM import cmunext_hspm_fbdm
+from src.network.conv_based.CMUNeXt_HSPM_FBDM import cmunext_hspm_fbdm, cmunext_hspm_fbdm_v2
 from src.network.conv_based.CMUNeXt_HSPM_APBR import cmunext_hspm_apbr
 from src.network.conv_based.CMUNeXt_HSPM_APBR_V2 import cmunext_hspm_apbr_v2
 from src.network.conv_based.CMUNeXt_HSPM_SDFR import cmunext_hspm_sdfr
@@ -40,7 +40,8 @@ from src.network.transfomer_based.transformer_based_network import get_transform
 
 
 APBR_MODELS = {"CMUNeXt_HSPM_APBR", "CMUNeXt_HSPM_APBR_V2"}
-HSPM_FBDM_MODELS = {"CMUNeXt_HSPM_FBDM"}
+HSPM_FBDM_V2_MODELS = {"CMUNeXt_HSPM_FBDM_V2"}
+HSPM_FBDM_MODELS = {"CMUNeXt_HSPM_FBDM", *HSPM_FBDM_V2_MODELS}
 FBDM_ONLY_MODELS = {"CMUNeXt_FBDM"}
 SDFR_V2_MODELS = {"CMUNeXt_HSPM_SDFR_V2"}
 SDFR_MODELS = {"CMUNeXt_HSPM_SDFR", *SDFR_V2_MODELS}
@@ -223,6 +224,31 @@ def build_model(args, parser):
             fbdm_gate_init=args.fbdm_gate_init,
             fbdm_gate_max=args.fbdm_gate_max,
             fbdm_edge_aux_only=args.fbdm_edge_aux_only,
+        )
+    elif args.model == "CMUNeXt_HSPM_FBDM_V2":
+        model = cmunext_hspm_fbdm_v2(
+            num_classes=args.num_classes,
+            hspm_mode=args.hspm_mode,
+            hspm_mixer_mode=args.hspm_mixer_mode,
+            hspm_gamma_init=args.hspm_gamma_init,
+            hspm_gamma_max=args.hspm_gamma_max,
+            hspm_temperature=args.hspm_temperature,
+            hspm_prototype_dropout=args.hspm_prototype_dropout,
+            hspm_backbone_mode=args.hspm_backbone_mode,
+            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
+            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
+            hspm_fusion_mode=args.hspm_fusion_mode,
+            hspm_small_area_threshold=args.hspm_small_area_threshold,
+            hspm_small_area_temperature=args.hspm_small_area_temperature,
+            fbdm_use_hspm_prior=not args.fbdm_no_hspm_prior,
+            fbdm_detach_hspm_prior=not args.fbdm_no_detach_hspm_prior,
+            fbdm_semantic_uncertainty_weight=args.fbdm_semantic_uncertainty_weight,
+            fbdm_semantic_coarse_weight=args.fbdm_semantic_coarse_weight,
+            fbdm_semantic_gate_base=args.fbdm_semantic_gate_base,
+            fbdm_gate_init=args.fbdm_gate_init,
+            fbdm_gate_max=args.fbdm_gate_max,
+            fbdm_correction_scale_init=args.fbdm_correction_scale_init,
+            fbdm_correction_scale_max=args.fbdm_correction_scale_max,
         )
     elif args.model == "CMUNeXt_HSPM_APBR":
         model = cmunext_hspm_apbr(
@@ -706,7 +732,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Validation script for medical image segmentation")
 
     model_choices = [
-        "CMUNet", "CMUNeXt", "CMUNeXt_FBDM", "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", "CMUNeXt_HSPM_FBDM", "CMUNeXt_HSPM_APBR",
+        "CMUNet", "CMUNeXt", "CMUNeXt_FBDM", "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", "CMUNeXt_HSPM_FBDM", "CMUNeXt_HSPM_FBDM_V2", "CMUNeXt_HSPM_APBR",
         "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_SDFR", "CMUNeXt_HSPM_SDFR_V2",
         "CMUNeXt_HSPM_UBRD",
         "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
@@ -808,6 +834,12 @@ if __name__ == "__main__":
                         help="Auxiliary edge loss weight for FBDM models")
     parser.add_argument("--fbdm_edge_kernel_size", type=int, default=3,
                         help="Odd kernel size used to build edge supervision masks for FBDM models")
+    parser.add_argument("--fbdm_correction_scale_init", type=float, default=0.05,
+                        help="Initial effective bounded logit-correction scale for FBDM V2")
+    parser.add_argument("--fbdm_correction_scale_max", type=float, default=0.3,
+                        help="Maximum effective bounded logit-correction scale for FBDM V2")
+    parser.add_argument("--fbdm_correction_warmup_epochs", type=int, default=40,
+                        help="Training-only compatibility option; inference uses full correction scale")
     parser.add_argument("--early_stop_patience", type=int, default=0,
                         help="Training-only compatibility option")
     parser.add_argument("--early_stop_min_delta", type=float, default=0.001,
@@ -889,6 +921,10 @@ if __name__ == "__main__":
         parser.error("--fbdm_edge_loss_weight must be non-negative.")
     if args.fbdm_edge_kernel_size <= 0 or args.fbdm_edge_kernel_size % 2 == 0:
         parser.error("--fbdm_edge_kernel_size must be a positive odd integer.")
+    if not 0.0 < args.fbdm_correction_scale_init < args.fbdm_correction_scale_max:
+        parser.error("--fbdm_correction_scale_init must be in (0, --fbdm_correction_scale_max).")
+    if args.fbdm_correction_warmup_epochs < 0:
+        parser.error("--fbdm_correction_warmup_epochs must be non-negative.")
     if args.visual_mode == "selected" and not args.visual_case:
         parser.error("--visual_case is required when --visual_mode selected")
 

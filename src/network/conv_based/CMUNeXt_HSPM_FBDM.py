@@ -150,6 +150,8 @@ class FBDM(nn.Module):
         gate_ratio = float(gate_init) / self.gate_max
         self.gamma_raw = nn.Parameter(torch.tensor(_inverse_sigmoid(gate_ratio), dtype=torch.float32))
         self.residual_scale = 1.0
+        self.last_boundary_gate = None
+        self.last_edge_logits = None
 
     def effective_gamma(self):
         return self.gate_max * torch.sigmoid(self.gamma_raw) * self.residual_scale
@@ -223,8 +225,122 @@ class FBDM(nn.Module):
         gate = torch.sigmoid(self.gate_proj(gate_input))
         out = x + self.effective_gamma() * gate * residual
         edge_logits = self.edge_head(out)
+        self.last_boundary_gate = boundary_gate
+        self.last_edge_logits = edge_logits
         main_feature = x if self.edge_aux_only else out
         return main_feature, edge_logits
+
+
+class FBDMLogitCorrection(nn.Module):
+    def __init__(
+        self,
+        channels,
+        logit_channels=1,
+        correction_scale_init=0.05,
+        correction_scale_max=0.3,
+    ):
+        super().__init__()
+        if channels <= 0:
+            raise ValueError("channels must be positive.")
+        if logit_channels <= 0:
+            raise ValueError("logit_channels must be positive.")
+        if not 0.0 < correction_scale_init < correction_scale_max:
+            raise ValueError(
+                "correction_scale_init must be in (0, correction_scale_max)."
+            )
+
+        self.correction_scale_max = float(correction_scale_max)
+        self.schedule_scale = 1.0
+        self.last_boundary_gate = None
+        self.last_base_logits = None
+        self.last_raw_correction = None
+        self.last_logit_correction = None
+        self.last_final_logits = None
+
+        correction_in_channels = channels + 2 * logit_channels + 1
+        self.correction_features = nn.Sequential(
+            nn.Conv2d(correction_in_channels, channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.GELU(),
+            nn.Conv2d(
+                channels,
+                channels,
+                kernel_size=3,
+                padding=1,
+                groups=channels,
+                bias=False,
+            ),
+            nn.BatchNorm2d(channels),
+            nn.GELU(),
+        )
+        self.correction_head = nn.Conv2d(channels, logit_channels, kernel_size=1)
+        nn.init.zeros_(self.correction_head.weight)
+        nn.init.zeros_(self.correction_head.bias)
+
+        correction_ratio = float(correction_scale_init) / self.correction_scale_max
+        self.correction_scale_raw = nn.Parameter(
+            torch.tensor(_inverse_sigmoid(correction_ratio), dtype=torch.float32)
+        )
+
+    def effective_correction_scale(self):
+        return self.correction_scale_max * torch.sigmoid(self.correction_scale_raw)
+
+    def set_schedule_scale(self, scale):
+        self.schedule_scale = min(max(float(scale), 0.0), 1.0)
+
+    def diagnostics(self):
+        if self.last_boundary_gate is None:
+            return None
+        boundary_gate = self.last_boundary_gate.detach()
+        logit_correction = self.last_logit_correction.detach()
+        base_prediction = self.last_base_logits.detach() > 0
+        final_prediction = self.last_final_logits.detach() > 0
+        return {
+            "correction_schedule_scale": boundary_gate.new_tensor(self.schedule_scale),
+            "effective_correction_scale": self.effective_correction_scale().detach(),
+            "boundary_gate_mean": boundary_gate.mean(),
+            "boundary_gate_over_05": (
+                boundary_gate > 0.5
+            ).to(boundary_gate.dtype).mean(),
+            "logit_correction_abs_mean": logit_correction.abs().mean(),
+            "logit_correction_abs_max": logit_correction.abs().max(),
+            "prediction_flip_ratio": (
+                base_prediction != final_prediction
+            ).to(boundary_gate.dtype).mean(),
+        }
+
+    def forward(self, feature, base_logits, edge_logits, boundary_gate):
+        detached_feature = feature.detach()
+        base_probability = torch.sigmoid(base_logits.detach())
+        edge_probability = torch.sigmoid(edge_logits)
+        detached_boundary_gate = boundary_gate.detach()
+        raw_correction = self.correction_head(
+            self.correction_features(
+                torch.cat(
+                    [
+                        detached_feature,
+                        base_probability,
+                        edge_probability,
+                        detached_boundary_gate,
+                    ],
+                    dim=1,
+                )
+            )
+        )
+        logit_correction = (
+            self.schedule_scale
+            * detached_boundary_gate
+            * self.effective_correction_scale()
+            * torch.tanh(raw_correction)
+        )
+        final_logits = base_logits + logit_correction
+
+        self.last_boundary_gate = detached_boundary_gate
+        self.last_base_logits = base_logits
+        self.last_raw_correction = raw_correction
+        self.last_logit_correction = logit_correction
+        self.last_final_logits = final_logits
+        return final_logits, logit_correction
 
 
 class CMUNeXt_HSPM_FBDM(CMUNeXt_HSPM):
@@ -350,6 +466,150 @@ class CMUNeXt_HSPM_FBDM(CMUNeXt_HSPM):
         }
 
 
+class CMUNeXt_HSPM_FBDM_V2(CMUNeXt_HSPM_FBDM):
+    def __init__(
+        self,
+        input_channel=3,
+        num_classes=1,
+        dims=(16, 32, 128, 160, 256),
+        depths=(1, 1, 1, 3, 1),
+        kernels=(3, 3, 7, 7, 7),
+        hspm_mode="full",
+        hspm_mixer_mode="legacy",
+        hspm_gamma_init=0.1,
+        hspm_gamma_max=0.3,
+        hspm_temperature=0.1,
+        hspm_prototype_dropout=0.0,
+        hspm_backbone_mode="highres_only",
+        hspm_fusion_gate_init=0.05,
+        hspm_fusion_gate_max=0.3,
+        hspm_fusion_mode="global",
+        hspm_small_area_threshold=0.05,
+        hspm_small_area_temperature=0.02,
+        fbdm_use_hspm_prior=True,
+        fbdm_detach_hspm_prior=True,
+        fbdm_semantic_uncertainty_weight=0.7,
+        fbdm_semantic_coarse_weight=0.3,
+        fbdm_semantic_gate_base=0.7,
+        fbdm_gate_init=0.03,
+        fbdm_gate_max=0.2,
+        fbdm_correction_scale_init=0.05,
+        fbdm_correction_scale_max=0.3,
+    ):
+        super().__init__(
+            input_channel=input_channel,
+            num_classes=num_classes,
+            dims=dims,
+            depths=depths,
+            kernels=kernels,
+            hspm_mode=hspm_mode,
+            hspm_mixer_mode=hspm_mixer_mode,
+            hspm_gamma_init=hspm_gamma_init,
+            hspm_gamma_max=hspm_gamma_max,
+            hspm_temperature=hspm_temperature,
+            hspm_prototype_dropout=hspm_prototype_dropout,
+            hspm_backbone_mode=hspm_backbone_mode,
+            hspm_fusion_gate_init=hspm_fusion_gate_init,
+            hspm_fusion_gate_max=hspm_fusion_gate_max,
+            hspm_fusion_mode=hspm_fusion_mode,
+            hspm_small_area_threshold=hspm_small_area_threshold,
+            hspm_small_area_temperature=hspm_small_area_temperature,
+            fbdm_use_hspm_prior=fbdm_use_hspm_prior,
+            fbdm_detach_hspm_prior=fbdm_detach_hspm_prior,
+            fbdm_semantic_uncertainty_weight=fbdm_semantic_uncertainty_weight,
+            fbdm_semantic_coarse_weight=fbdm_semantic_coarse_weight,
+            fbdm_semantic_gate_base=fbdm_semantic_gate_base,
+            fbdm_gate_init=fbdm_gate_init,
+            fbdm_gate_max=fbdm_gate_max,
+            fbdm_edge_aux_only=True,
+        )
+        self.fbdm_correction = FBDMLogitCorrection(
+            channels=dims[0],
+            logit_channels=num_classes,
+            correction_scale_init=fbdm_correction_scale_init,
+            correction_scale_max=fbdm_correction_scale_max,
+        )
+
+    def set_fbdm_correction_schedule_scale(self, scale):
+        self.fbdm_correction.set_schedule_scale(scale)
+
+    def get_fbdm_v2_diagnostics(self):
+        return self.fbdm_correction.diagnostics()
+
+    def forward(self, x):
+        self.last_fusion_diagnostics = None
+        x1 = self.encoder1(self.stem(x))
+        x2 = self.encoder2(self.Maxpool(x1))
+        x3 = self.encoder3(self.Maxpool(x2))
+        x4 = self.encoder4(self.Maxpool(x3))
+
+        hspm_feature = self.high_resolution_context(x4)
+        hspm_feature, coarse_logits, uncertainty = self.prototype_mixer(
+            hspm_feature,
+            use_prototype=self.hspm_mode == "full",
+        )
+
+        if self.hspm_backbone_mode == "dual_path":
+            x5 = self.encoder5(self.Maxpool(x4))
+            deep_feature = self.Up5(x5)
+            deep_feature = self.Up_conv5(torch.cat((x4, deep_feature), dim=1))
+            hspm_residual = self.hspm_projection(hspm_feature)
+            effective_gate = self.effective_fusion_gate()
+            if self.hspm_fusion_mode == "size_aware":
+                spatial_gate, smallness, predicted_area = self.build_spatial_gate(
+                    coarse_logits,
+                    uncertainty,
+                )
+                injection = effective_gate * spatial_gate * hspm_residual
+                self._record_fusion_diagnostics(
+                    effective_gate,
+                    deep_feature,
+                    injection,
+                    spatial_gate=spatial_gate,
+                    smallness=smallness,
+                    predicted_area=predicted_area,
+                )
+            else:
+                injection = effective_gate * hspm_residual
+                self._record_fusion_diagnostics(effective_gate, deep_feature, injection)
+            decoder_input = deep_feature + injection
+        else:
+            decoder_input = hspm_feature
+
+        d4 = self.Up4(decoder_input)
+        d4 = self.Up_conv4(torch.cat((x3, d4), dim=1))
+
+        d3 = self.Up3(d4)
+        d3 = self.Up_conv3(torch.cat((x2, d3), dim=1))
+
+        x1_fbdm, edge_logits = self.fbdm1(
+            x1,
+            coarse_logits=coarse_logits,
+            uncertainty=uncertainty,
+        )
+        d2 = self.Up2(d3)
+        d2 = self.Up_conv2(torch.cat((x1_fbdm, d2), dim=1))
+
+        base_logits = self.Conv_1x1(d2)
+        boundary_gate = self.fbdm1.last_boundary_gate
+        if boundary_gate is None:
+            raise RuntimeError("FBDM boundary gate was not recorded before V2 correction.")
+        final_logits, logit_correction = self.fbdm_correction(
+            d2,
+            base_logits,
+            edge_logits,
+            boundary_gate,
+        )
+        return {
+            "seg": final_logits,
+            "base_seg": base_logits,
+            "coarse": coarse_logits,
+            "uncertainty": uncertainty,
+            "edge": edge_logits,
+            "logit_correction": logit_correction,
+        }
+
+
 def cmunext_hspm_fbdm(
     input_channel=3,
     num_classes=1,
@@ -359,6 +619,24 @@ def cmunext_hspm_fbdm(
     **kwargs,
 ):
     return CMUNeXt_HSPM_FBDM(
+        input_channel=input_channel,
+        num_classes=num_classes,
+        dims=dims,
+        depths=depths,
+        kernels=kernels,
+        **kwargs,
+    )
+
+
+def cmunext_hspm_fbdm_v2(
+    input_channel=3,
+    num_classes=1,
+    dims=(16, 32, 128, 160, 256),
+    depths=(1, 1, 1, 3, 1),
+    kernels=(3, 3, 7, 7, 7),
+    **kwargs,
+):
+    return CMUNeXt_HSPM_FBDM_V2(
         input_channel=input_channel,
         num_classes=num_classes,
         dims=dims,
