@@ -30,10 +30,12 @@ from src.network.conv_based.UNetplus import ResNet34UnetPlus
 from src.network.conv_based.UNet3plus import UNet3plus
 from src.network.conv_based.CMUNeXt import cmunext
 from src.network.conv_based.CMUNeXt_FBDM import cmunext_fbdm
+from src.network.conv_based.CMUNeXt_FBDM_Best0616 import cmunext_fbdm_best0616
 from src.network.conv_based.CMUNeXt_USLGSF import cmunext_uslgsf
 from src.network.conv_based.CMUNeXt_USLGSF_V2 import cmunext_uslgsf_v2
 from src.network.conv_based.CMUNeXt_USLGSF_V3 import cmunext_uslgsf_v3
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
+from src.network.conv_based.CMUNeXt_HSPM_Best0616 import cmunext_hspm_best0616
 from src.network.conv_based.CMUNeXt_HSPM_FBDM import cmunext_hspm_fbdm, cmunext_hspm_fbdm_v2
 from src.network.conv_based.CMUNeXt_HSPM_APBR import cmunext_hspm_apbr
 from src.network.conv_based.CMUNeXt_HSPM_APBR_V2 import cmunext_hspm_apbr_v2
@@ -57,11 +59,14 @@ from src.network.hybrid_based.Mobile_U_ViT import mobileuvit, mobileuvit_l
 APBR_MODELS = {"CMUNeXt_HSPM_APBR", "CMUNeXt_HSPM_APBR_V2"}
 HSPM_FBDM_V2_MODELS = {"CMUNeXt_HSPM_FBDM_V2"}
 HSPM_FBDM_MODELS = {"CMUNeXt_HSPM_FBDM", *HSPM_FBDM_V2_MODELS}
-FBDM_ONLY_MODELS = {"CMUNeXt_FBDM"}
+FBDM_BEST0616_MODEL = "CMUNeXt_FBDM_Best0616"
+HSPM_BEST0616_MODEL = "CMUNeXt_HSPM_Best0616"
+FBDM_ONLY_MODELS = {"CMUNeXt_FBDM", FBDM_BEST0616_MODEL}
 FBDM_MODELS = {*HSPM_FBDM_MODELS, *FBDM_ONLY_MODELS}
 SDFR_V2_MODELS = {"CMUNeXt_HSPM_SDFR_V2"}
 SDFR_MODELS = {"CMUNeXt_HSPM_SDFR", *SDFR_V2_MODELS}
-HSPM_MODELS = {"CMUNeXt_HSPM", *HSPM_FBDM_MODELS, *APBR_MODELS, *SDFR_MODELS}
+HSPM_ONLY_MODELS = {"CMUNeXt_HSPM", HSPM_BEST0616_MODEL}
+HSPM_MODELS = {*HSPM_ONLY_MODELS, *HSPM_FBDM_MODELS, *APBR_MODELS, *SDFR_MODELS}
 USLGSF_V3_MODELS = {"CMUNeXt_USLGSF_V3"}
 USLGSF_V3_DIAGNOSTIC_NAMES = (
     "structure_reliability_mean",
@@ -189,9 +194,35 @@ def parse_gag_stages(value):
     return tuple(stages)
 
 
+def apply_best0616_presets(args):
+    if args.model == FBDM_BEST0616_MODEL:
+        args.fbdm_edge_aux_only = True
+        args.fbdm_gate_init = 0.01
+        args.fbdm_gate_max = 0.06
+        args.fbdm_residual_warmup_epochs = 40
+        args.fbdm_edge_loss_weight = 0.03
+        args.fbdm_edge_loss_final_weight = 0.003
+        args.fbdm_edge_loss_decay_epochs = 150
+    elif args.model == HSPM_BEST0616_MODEL:
+        args.hspm_mode = "full"
+        args.hspm_backbone_mode = "dual_path"
+        args.hspm_fusion_mode = "global"
+        args.hspm_mixer_mode = "legacy"
+        args.hspm_gamma_init = 0.1
+        args.hspm_gamma_max = 0.3
+        args.hspm_temperature = 0.1
+        args.hspm_prototype_dropout = 0.0
+        args.hspm_fusion_gate_init = 0.05
+        args.hspm_fusion_gate_max = 0.3
+        args.hspm_coarse_loss_weight = 0.1
+        args.hspm_coarse_loss_final_weight = 0.02
+        args.hspm_coarse_loss_decay_epochs = 150
+    return args
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default="CMUNeXt",
-                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_FBDM", "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", "CMUNeXt_HSPM_FBDM", "CMUNeXt_HSPM_FBDM_V2", "CMUNeXt_HSPM_APBR",
+                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_FBDM", FBDM_BEST0616_MODEL, "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", HSPM_BEST0616_MODEL, "CMUNeXt_HSPM_FBDM", "CMUNeXt_HSPM_FBDM_V2", "CMUNeXt_HSPM_APBR",
                              "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_SDFR",
                              "CMUNeXt_HSPM_SDFR_V2", "CMUNeXt_HSPM_UBRD",
                              "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
@@ -382,6 +413,7 @@ parser.add_argument('--val_threshold_step', type=float, default=0.02,
 parser.add_argument('--val_threshold_metric', type=str, default="iou", choices=["iou", "f1"],
                     help='Metric used to pick the best validation threshold')
 args = parser.parse_args()
+apply_best0616_presets(args)
 seed_torch(args.seed)
 
 
@@ -399,6 +431,8 @@ def get_model(args):
             fbdm_gate_max=args.fbdm_gate_max,
             fbdm_edge_aux_only=args.fbdm_edge_aux_only,
         ).cuda()
+    elif args.model == FBDM_BEST0616_MODEL:
+        model = cmunext_fbdm_best0616(num_classes=args.num_classes).cuda()
     elif args.model == "CMUNeXt_USLGSF":
         model = cmunext_uslgsf(
             num_classes=args.num_classes,
@@ -446,6 +480,8 @@ def get_model(args):
             hspm_small_area_threshold=args.hspm_small_area_threshold,
             hspm_small_area_temperature=args.hspm_small_area_temperature,
         ).cuda()
+    elif args.model == HSPM_BEST0616_MODEL:
+        model = cmunext_hspm_best0616(num_classes=args.num_classes).cuda()
     elif args.model == "CMUNeXt_HSPM_FBDM":
         model = cmunext_hspm_fbdm(
             num_classes=args.num_classes,
@@ -661,7 +697,7 @@ def get_criterion(args):
             edge_weight=args.fbdm_edge_loss_weight,
             edge_kernel_size=args.fbdm_edge_kernel_size,
         ).cuda()
-    if args.model == "CMUNeXt_HSPM":
+    if args.model in HSPM_ONLY_MODELS:
         return losses.__dict__['HSPMLoss'](coarse_weight=args.hspm_coarse_loss_weight).cuda()
     if args.model in {"CMUNeXt_BA_DualGAG", "CMUNeXt_BA_DualGAG_SpeckleEnhance"}:
         return losses.__dict__['BoundaryAwareSegLoss'](lambda_b=args.boundary_loss_weight).cuda()
@@ -767,7 +803,7 @@ def compute_loss(
         )
     if args.model in FBDM_ONLY_MODELS:
         return criterion(outputs, label_batch, edge_weight=edge_weight, return_components=True)
-    if args.model == "CMUNeXt_HSPM":
+    if args.model in HSPM_ONLY_MODELS:
         return criterion(outputs, label_batch, coarse_weight=aux_weight)
     return criterion(outputs, label_batch)
 

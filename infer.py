@@ -15,10 +15,12 @@ from src.network.conv_based.AttU_Net import AttU_Net
 from src.network.conv_based.CMUNet import CMUNet
 from src.network.conv_based.CMUNeXt import cmunext
 from src.network.conv_based.CMUNeXt_FBDM import cmunext_fbdm
+from src.network.conv_based.CMUNeXt_FBDM_Best0616 import cmunext_fbdm_best0616
 from src.network.conv_based.CMUNeXt_USLGSF import cmunext_uslgsf
 from src.network.conv_based.CMUNeXt_USLGSF_V2 import cmunext_uslgsf_v2
 from src.network.conv_based.CMUNeXt_USLGSF_V3 import cmunext_uslgsf_v3
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
+from src.network.conv_based.CMUNeXt_HSPM_Best0616 import cmunext_hspm_best0616
 from src.network.conv_based.CMUNeXt_HSPM_FBDM import cmunext_hspm_fbdm, cmunext_hspm_fbdm_v2
 from src.network.conv_based.CMUNeXt_HSPM_APBR import cmunext_hspm_apbr
 from src.network.conv_based.CMUNeXt_HSPM_APBR_V2 import cmunext_hspm_apbr_v2
@@ -42,10 +44,13 @@ from src.network.transfomer_based.transformer_based_network import get_transform
 APBR_MODELS = {"CMUNeXt_HSPM_APBR", "CMUNeXt_HSPM_APBR_V2"}
 HSPM_FBDM_V2_MODELS = {"CMUNeXt_HSPM_FBDM_V2"}
 HSPM_FBDM_MODELS = {"CMUNeXt_HSPM_FBDM", *HSPM_FBDM_V2_MODELS}
-FBDM_ONLY_MODELS = {"CMUNeXt_FBDM"}
+FBDM_BEST0616_MODEL = "CMUNeXt_FBDM_Best0616"
+HSPM_BEST0616_MODEL = "CMUNeXt_HSPM_Best0616"
+FBDM_ONLY_MODELS = {"CMUNeXt_FBDM", FBDM_BEST0616_MODEL}
 SDFR_V2_MODELS = {"CMUNeXt_HSPM_SDFR_V2"}
 SDFR_MODELS = {"CMUNeXt_HSPM_SDFR", *SDFR_V2_MODELS}
-HSPM_MODELS = {"CMUNeXt_HSPM", *HSPM_FBDM_MODELS, *APBR_MODELS, *SDFR_MODELS}
+HSPM_ONLY_MODELS = {"CMUNeXt_HSPM", HSPM_BEST0616_MODEL}
+HSPM_MODELS = {*HSPM_ONLY_MODELS, *HSPM_FBDM_MODELS, *APBR_MODELS, *SDFR_MODELS}
 
 
 def parse_gag_stages(value):
@@ -140,6 +145,32 @@ def parse_uslgsf_smooth_kernels(value):
     return kernels
 
 
+def apply_best0616_presets(args):
+    if args.model == FBDM_BEST0616_MODEL:
+        args.fbdm_edge_aux_only = True
+        args.fbdm_gate_init = 0.01
+        args.fbdm_gate_max = 0.06
+        args.fbdm_edge_loss_weight = 0.03
+        args.fbdm_edge_loss_final_weight = 0.003
+        args.fbdm_edge_loss_decay_epochs = 150
+        args.fbdm_residual_warmup_epochs = 40
+    elif args.model == HSPM_BEST0616_MODEL:
+        args.hspm_mode = "full"
+        args.hspm_backbone_mode = "dual_path"
+        args.hspm_fusion_mode = "global"
+        args.hspm_mixer_mode = "legacy"
+        args.hspm_gamma_init = 0.1
+        args.hspm_gamma_max = 0.3
+        args.hspm_temperature = 0.1
+        args.hspm_prototype_dropout = 0.0
+        args.hspm_fusion_gate_init = 0.05
+        args.hspm_fusion_gate_max = 0.3
+        args.hspm_coarse_loss_weight = 0.1
+        args.hspm_coarse_loss_final_weight = 0.02
+        args.hspm_coarse_loss_decay_epochs = 150
+    return args
+
+
 def build_model(args, parser):
     if args.model == "CMUNet":
         model = CMUNet(output_ch=args.num_classes)
@@ -154,6 +185,8 @@ def build_model(args, parser):
             fbdm_gate_max=args.fbdm_gate_max,
             fbdm_edge_aux_only=args.fbdm_edge_aux_only,
         )
+    elif args.model == FBDM_BEST0616_MODEL:
+        model = cmunext_fbdm_best0616(num_classes=args.num_classes)
     elif args.model == "CMUNeXt_USLGSF":
         model = cmunext_uslgsf(
             num_classes=args.num_classes,
@@ -201,6 +234,8 @@ def build_model(args, parser):
             hspm_small_area_threshold=args.hspm_small_area_threshold,
             hspm_small_area_temperature=args.hspm_small_area_temperature,
         )
+    elif args.model == HSPM_BEST0616_MODEL:
+        model = cmunext_hspm_best0616(num_classes=args.num_classes)
     elif args.model == "CMUNeXt_HSPM_FBDM":
         model = cmunext_hspm_fbdm(
             num_classes=args.num_classes,
@@ -732,7 +767,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Validation script for medical image segmentation")
 
     model_choices = [
-        "CMUNet", "CMUNeXt", "CMUNeXt_FBDM", "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", "CMUNeXt_HSPM_FBDM", "CMUNeXt_HSPM_FBDM_V2", "CMUNeXt_HSPM_APBR",
+        "CMUNet", "CMUNeXt", "CMUNeXt_FBDM", FBDM_BEST0616_MODEL, "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", HSPM_BEST0616_MODEL, "CMUNeXt_HSPM_FBDM", "CMUNeXt_HSPM_FBDM_V2", "CMUNeXt_HSPM_APBR",
         "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_SDFR", "CMUNeXt_HSPM_SDFR_V2",
         "CMUNeXt_HSPM_UBRD",
         "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
@@ -916,6 +951,7 @@ if __name__ == "__main__":
     parser.add_argument("--visual_case", type=str, default=None,
                         help="Case name to visualize when visual_mode=selected")
     args = parser.parse_args()
+    apply_best0616_presets(args)
 
     if args.model in {*APBR_MODELS, *SDFR_MODELS}:
         args.hspm_backbone_mode = "dual_path"
@@ -1014,7 +1050,7 @@ if __name__ == "__main__":
             edge_weight=args.fbdm_edge_loss_weight,
             edge_kernel_size=args.fbdm_edge_kernel_size,
         ).to(device)
-    elif args.model == "CMUNeXt_HSPM":
+    elif args.model in HSPM_ONLY_MODELS:
         criterion = losses.__dict__["HSPMLoss"](coarse_weight=args.hspm_coarse_loss_weight).to(device)
     elif args.model in {"CMUNeXt_BA_DualGAG", "CMUNeXt_BA_DualGAG_SpeckleEnhance"}:
         criterion = losses.__dict__["BoundaryAwareSegLoss"](lambda_b=args.boundary_loss_weight).to(device)
