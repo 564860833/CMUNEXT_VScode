@@ -12,7 +12,6 @@ from src.network.conv_based.CMUNeXt_HSPM import (
     ConfidenceAwarePrototypeMixer,
     cmunext_hspm,
 )
-from src.network.conv_based.CMUNeXt_HSPM_UBRD import cmunext_hspm_ubrd
 from src.utils.losses import HSPMLoss
 
 
@@ -292,20 +291,6 @@ class HSPMStabilityTests(unittest.TestCase):
         size_aware_model.load_state_dict(global_model.state_dict(), strict=True)
         self.assertNotIn("hspm_small_area_threshold", global_model.state_dict())
         self.assertNotIn("hspm_small_area_temperature", global_model.state_dict())
-
-    def test_ubrd_legacy_state_dict_contract_is_unchanged(self):
-        legacy_ubrd = cmunext_hspm_ubrd(
-            dims=(4, 8, 16, 20, 24),
-            depths=(1, 1, 1, 1, 1),
-            kernels=(3, 3, 3, 3, 3),
-        )
-        rebuilt_ubrd = cmunext_hspm_ubrd(
-            dims=(4, 8, 16, 20, 24),
-            depths=(1, 1, 1, 1, 1),
-            kernels=(3, 3, 3, 3, 3),
-        )
-        rebuilt_ubrd.load_state_dict(legacy_ubrd.state_dict(), strict=True)
-
 
 if __name__ == "__main__":
     unittest.main()

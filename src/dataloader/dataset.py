@@ -3,8 +3,6 @@ from torch.utils.data import Dataset
 import cv2
 import numpy as np
 
-from src.utils.sdf import compute_normalized_sdf
-
 
 class MedicalDataSets(Dataset):
     def __init__(
@@ -14,8 +12,6 @@ class MedicalDataSets(Dataset):
             transform=None,
             train_file_dir="train.txt",
             val_file_dir="val.txt",
-            return_sdf=False,
-            sdf_truncation_ratio=0.08,
             divide_image_by_255=False,
     ):
         self._base_dir = base_dir
@@ -24,11 +20,7 @@ class MedicalDataSets(Dataset):
         self.transform = transform
         self.train_list = []
         self.semi_list = []
-        self.return_sdf = bool(return_sdf)
-        self.sdf_truncation_ratio = float(sdf_truncation_ratio)
         self.divide_image_by_255 = bool(divide_image_by_255)
-        if self.sdf_truncation_ratio <= 0:
-            raise ValueError("sdf_truncation_ratio must be positive.")
 
         if self.split == "train":
             with open(os.path.join(self._base_dir, train_file_dir), "r") as f1:
@@ -100,10 +92,4 @@ class MedicalDataSets(Dataset):
             "image_path": image_path,
             "mask_path": mask_path,
         }
-        if self.return_sdf:
-            sdf = compute_normalized_sdf(
-                label.transpose(1, 2, 0),
-                truncation_ratio=self.sdf_truncation_ratio,
-            )
-            sample["sdf"] = sdf[None, ...]
         return sample

@@ -22,11 +22,6 @@ from src.network.conv_based.CMUNeXt_USLGSF_V3 import cmunext_uslgsf_v3
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
 from src.network.conv_based.CMUNeXt_HSPM_Best0616 import cmunext_hspm_best0616
 from src.network.conv_based.CMUNeXt_HSPM_FBDM import cmunext_hspm_fbdm, cmunext_hspm_fbdm_v2
-from src.network.conv_based.CMUNeXt_HSPM_APBR import cmunext_hspm_apbr
-from src.network.conv_based.CMUNeXt_HSPM_APBR_V2 import cmunext_hspm_apbr_v2
-from src.network.conv_based.CMUNeXt_HSPM_SDFR import cmunext_hspm_sdfr
-from src.network.conv_based.CMUNeXt_HSPM_SDFR_V2 import cmunext_hspm_sdfr_v2
-from src.network.conv_based.CMUNeXt_HSPM_UBRD import cmunext_hspm_ubrd
 from src.network.conv_based.CMUNeXt_BA_DualGAG import cmunext_ba_dualgag
 from src.network.conv_based.CMUNeXt_BA_DualGAG_SpeckleEnhance import cmunext_ba_dualgag_speckleenhance
 from src.network.conv_based.CMUNeXt_DualGAG import cmunext_dualgag
@@ -41,16 +36,13 @@ from src.network.hybrid_based.Mobile_U_ViT import mobileuvit
 from src.network.transfomer_based.transformer_based_network import get_transformer_based_model
 
 
-APBR_MODELS = {"CMUNeXt_HSPM_APBR", "CMUNeXt_HSPM_APBR_V2"}
 HSPM_FBDM_V2_MODELS = {"CMUNeXt_HSPM_FBDM_V2"}
 HSPM_FBDM_MODELS = {"CMUNeXt_HSPM_FBDM", *HSPM_FBDM_V2_MODELS}
 FBDM_BEST0616_MODEL = "CMUNeXt_FBDM_Best0616"
 HSPM_BEST0616_MODEL = "CMUNeXt_HSPM_Best0616"
 FBDM_ONLY_MODELS = {"CMUNeXt_FBDM", FBDM_BEST0616_MODEL}
-SDFR_V2_MODELS = {"CMUNeXt_HSPM_SDFR_V2"}
-SDFR_MODELS = {"CMUNeXt_HSPM_SDFR", *SDFR_V2_MODELS}
 HSPM_ONLY_MODELS = {"CMUNeXt_HSPM", HSPM_BEST0616_MODEL}
-HSPM_MODELS = {*HSPM_ONLY_MODELS, *HSPM_FBDM_MODELS, *APBR_MODELS, *SDFR_MODELS}
+HSPM_MODELS = {*HSPM_ONLY_MODELS, *HSPM_FBDM_MODELS}
 
 
 def parse_gag_stages(value):
@@ -284,80 +276,6 @@ def build_model(args, parser):
             fbdm_gate_max=args.fbdm_gate_max,
             fbdm_correction_scale_init=args.fbdm_correction_scale_init,
             fbdm_correction_scale_max=args.fbdm_correction_scale_max,
-        )
-    elif args.model == "CMUNeXt_HSPM_APBR":
-        model = cmunext_hspm_apbr(
-            num_classes=args.num_classes,
-            hspm_mode=args.hspm_mode,
-            hspm_mixer_mode=args.hspm_mixer_mode,
-            hspm_gamma_init=args.hspm_gamma_init,
-            hspm_gamma_max=args.hspm_gamma_max,
-            hspm_temperature=args.hspm_temperature,
-            hspm_prototype_dropout=args.hspm_prototype_dropout,
-            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
-            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
-            hspm_fusion_mode=args.hspm_fusion_mode,
-            hspm_small_area_threshold=args.hspm_small_area_threshold,
-            hspm_small_area_temperature=args.hspm_small_area_temperature,
-            apbr_mode=args.apbr_mode,
-        )
-    elif args.model == "CMUNeXt_HSPM_APBR_V2":
-        model = cmunext_hspm_apbr_v2(
-            num_classes=args.num_classes,
-            hspm_mode=args.hspm_mode,
-            hspm_mixer_mode=args.hspm_mixer_mode,
-            hspm_gamma_init=args.hspm_gamma_init,
-            hspm_gamma_max=args.hspm_gamma_max,
-            hspm_temperature=args.hspm_temperature,
-            hspm_prototype_dropout=args.hspm_prototype_dropout,
-            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
-            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
-            hspm_fusion_mode=args.hspm_fusion_mode,
-            hspm_small_area_threshold=args.hspm_small_area_threshold,
-            hspm_small_area_temperature=args.hspm_small_area_temperature,
-            apbr_mode=args.apbr_mode,
-        )
-    elif args.model == "CMUNeXt_HSPM_SDFR":
-        model = cmunext_hspm_sdfr(
-            num_classes=args.num_classes,
-            hspm_mode=args.hspm_mode,
-            hspm_mixer_mode=args.hspm_mixer_mode,
-            hspm_gamma_init=args.hspm_gamma_init,
-            hspm_gamma_max=args.hspm_gamma_max,
-            hspm_temperature=args.hspm_temperature,
-            hspm_prototype_dropout=args.hspm_prototype_dropout,
-            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
-            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
-            hspm_fusion_mode=args.hspm_fusion_mode,
-            hspm_small_area_threshold=args.hspm_small_area_threshold,
-            hspm_small_area_temperature=args.hspm_small_area_temperature,
-            sdfr_boundary_temperature=args.sdfr_boundary_temperature,
-            sdfr_refine_scale_init=args.sdfr_refine_scale_init,
-            sdfr_refine_scale_max=args.sdfr_refine_scale_max,
-        )
-    elif args.model == "CMUNeXt_HSPM_SDFR_V2":
-        model = cmunext_hspm_sdfr_v2(
-            num_classes=args.num_classes,
-            hspm_mode=args.hspm_mode,
-            hspm_mixer_mode=args.hspm_mixer_mode,
-            hspm_gamma_init=args.hspm_gamma_init,
-            hspm_gamma_max=args.hspm_gamma_max,
-            hspm_temperature=args.hspm_temperature,
-            hspm_prototype_dropout=args.hspm_prototype_dropout,
-            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
-            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
-            hspm_fusion_mode=args.hspm_fusion_mode,
-            hspm_small_area_threshold=args.hspm_small_area_threshold,
-            hspm_small_area_temperature=args.hspm_small_area_temperature,
-            sdfr_boundary_temperature=args.sdfr_boundary_temperature,
-            sdfr_v2_correction_scale_init=args.sdfr_v2_correction_scale_init,
-            sdfr_v2_correction_scale_max=args.sdfr_v2_correction_scale_max,
-        )
-    elif args.model == "CMUNeXt_HSPM_UBRD":
-        model = cmunext_hspm_ubrd(
-            num_classes=args.num_classes,
-            hspm_mode=args.hspm_mode,
-            ubrd_mode=args.ubrd_mode,
         )
     elif args.model == "CMUNeXt_DualGAG":
         model = cmunext_dualgag(num_classes=args.num_classes, gag_stages=args.gag_stages)
@@ -667,13 +585,7 @@ def validate(model, val_loader, criterion, device, args, save_dir="validation_re
             img_batch, label_batch = img_batch.to(device), label_batch.to(device)
             outputs = forward_with_model(model, args.model, img_batch)
             seg_logits = get_seg_logits(outputs)
-            if args.model in SDFR_MODELS:
-                loss = criterion(
-                    outputs,
-                    label_batch,
-                    sampled_batch["sdf"].to(device),
-                )
-            elif args.model in {*HSPM_MODELS, "CMUNeXt_HSPM_UBRD"}:
+            if args.model in HSPM_MODELS:
                 loss = criterion(outputs, label_batch)
             elif args.model in FBDM_ONLY_MODELS:
                 loss = criterion(outputs, label_batch)
@@ -767,9 +679,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Validation script for medical image segmentation")
 
     model_choices = [
-        "CMUNet", "CMUNeXt", "CMUNeXt_FBDM", FBDM_BEST0616_MODEL, "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", HSPM_BEST0616_MODEL, "CMUNeXt_HSPM_FBDM", "CMUNeXt_HSPM_FBDM_V2", "CMUNeXt_HSPM_APBR",
-        "CMUNeXt_HSPM_APBR_V2", "CMUNeXt_HSPM_SDFR", "CMUNeXt_HSPM_SDFR_V2",
-        "CMUNeXt_HSPM_UBRD",
+        "CMUNet", "CMUNeXt", "CMUNeXt_FBDM", FBDM_BEST0616_MODEL, "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", HSPM_BEST0616_MODEL, "CMUNeXt_HSPM_FBDM", "CMUNeXt_HSPM_FBDM_V2",
         "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
         "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
         "CMUNeXt_BA_DualGAG_SpeckleEnhance",
@@ -821,7 +731,7 @@ if __name__ == "__main__":
                         help="Auxiliary coarse segmentation loss weight for CMUNeXt_HSPM")
     parser.add_argument("--hspm_mixer_mode", type=str, default="legacy",
                         choices=["legacy", "bounded", "stable"],
-                        help="Prototype mixer behavior for CMUNeXt_HSPM; UBRD always keeps legacy behavior")
+                        help="Prototype mixer behavior for CMUNeXt_HSPM")
     parser.add_argument("--hspm_gamma_init", type=float, default=0.1,
                         help="Initial prototype residual strength")
     parser.add_argument("--hspm_gamma_max", type=float, default=0.3,
@@ -887,53 +797,6 @@ if __name__ == "__main__":
                         help="Training-only compatibility option")
     parser.add_argument("--early_stop_min_delta", type=float, default=0.001,
                         help="Training-only compatibility option")
-    parser.add_argument("--ubrd_mode", type=str, default="full", choices=["add_only", "semantic_only", "full"],
-                        help="UBRD ablation mode for CMUNeXt_HSPM_UBRD")
-    parser.add_argument("--ubrd_boundary_loss_weight", type=float, default=0.0,
-                        help="Optional final-prediction boundary loss weight for CMUNeXt_HSPM_UBRD")
-    parser.add_argument("--apbr_mode", type=str, default="full",
-                        choices=["full", "no_ambiguity", "no_detail"],
-                        help="APBR ablation mode for CMUNeXt_HSPM_APBR and CMUNeXt_HSPM_APBR_V2")
-    parser.add_argument("--apbr_route_warmup_epochs", type=int, default=30,
-                        help="Training-only compatibility option; inference uses full APBR routing")
-    parser.add_argument("--apbr_coarse_loss_weight", type=float, default=0.1,
-                        help="Initial APBR coarse segmentation loss weight")
-    parser.add_argument("--apbr_coarse_loss_final_weight", type=float, default=0.02,
-                        help="Final APBR coarse segmentation loss weight")
-    parser.add_argument("--apbr_coarse_loss_decay_epochs", type=int, default=150,
-                        help="Training-only compatibility option")
-    parser.add_argument("--apbr_intermediate_loss_weight", type=float, default=0.15,
-                        help="Half-resolution APBR supervision weight")
-    parser.add_argument("--apbr_boundary_loss_weight", type=float, default=0.1,
-                        help="Final-prediction APBR boundary loss weight")
-    parser.add_argument("--sdfr_sdf_loss_weight", type=float, default=0.2,
-                        help="Signed-distance supervision weight")
-    parser.add_argument("--sdfr_sdf_warmup_epochs", type=int, default=10,
-                        help="Training-only compatibility option")
-    parser.add_argument("--sdfr_refine_start_epoch", type=int, default=10,
-                        help="Training-only compatibility option")
-    parser.add_argument("--sdfr_refine_warmup_epochs", type=int, default=30,
-                        help="Training-only compatibility option")
-    parser.add_argument("--sdfr_truncation_ratio", type=float, default=0.08,
-                        help="SDF truncation distance relative to the shorter image side")
-    parser.add_argument("--sdfr_boundary_temperature", type=float, default=0.2,
-                        help="Distance temperature for SDF boundary weighting and gating")
-    parser.add_argument("--sdfr_boundary_emphasis", type=float, default=4.0,
-                        help="Extra SDF loss emphasis near the target boundary; 0 disables weighting")
-    parser.add_argument("--sdfr_refine_scale_init", type=float, default=0.05,
-                        help="Initial effective SDF refinement residual scale")
-    parser.add_argument("--sdfr_refine_scale_max", type=float, default=0.3,
-                        help="Maximum effective SDF refinement residual scale")
-    parser.add_argument("--sdfr_v2_base_loss_weight", type=float, default=0.0,
-                        help="Compatibility option; stable SDFR V2 keeps base loss disabled")
-    parser.add_argument("--sdfr_v2_band_width", type=float, default=0.2,
-                        help="Normalized target SDF width supervised by SDFR V2")
-    parser.add_argument("--sdfr_v2_band_loss_weight", type=float, default=0.1,
-                        help="Boundary-band BCE weight for SDFR V2")
-    parser.add_argument("--sdfr_v2_correction_scale_init", type=float, default=0.1,
-                        help="Initial effective bounded logit-correction scale for SDFR V2")
-    parser.add_argument("--sdfr_v2_correction_scale_max", type=float, default=0.5,
-                        help="Maximum effective bounded logit-correction scale for SDFR V2")
     parser.add_argument("--val_threshold_mode", type=str, default="fixed", choices=["fixed", "scan"],
                         help="Use a fixed validation threshold or scan a threshold range")
     parser.add_argument("--val_threshold", type=float, default=0.5,
@@ -953,8 +816,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     apply_best0616_presets(args)
 
-    if args.model in {*APBR_MODELS, *SDFR_MODELS}:
-        args.hspm_backbone_mode = "dual_path"
     if args.fbdm_semantic_uncertainty_weight < 0 or args.fbdm_semantic_coarse_weight < 0:
         parser.error("FBDM semantic prior weights must be non-negative.")
     if not 0.0 <= args.fbdm_semantic_gate_base <= 1.0:
@@ -1003,41 +864,11 @@ if __name__ == "__main__":
         transform=val_transform,
         train_file_dir=args.train_file_dir,
         val_file_dir=args.val_file_dir,
-        return_sdf=args.model in SDFR_MODELS,
-        sdf_truncation_ratio=args.sdfr_truncation_ratio,
         divide_image_by_255=args.model == "CMUNeXt",
     )
     val_loader = DataLoader(db_val, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
-    if args.model in SDFR_V2_MODELS:
-        criterion = losses.__dict__["SDFRV2Loss"](
-            coarse_weight=0.0,
-            sdf_weight=args.sdfr_sdf_loss_weight,
-            boundary_temperature=args.sdfr_boundary_temperature,
-            boundary_emphasis=args.sdfr_boundary_emphasis,
-            base_weight=0.0,
-            band_width=args.sdfr_v2_band_width,
-            band_weight=args.sdfr_v2_band_loss_weight,
-        ).to(device)
-    elif args.model in SDFR_MODELS:
-        criterion = losses.__dict__["SDFRLoss"](
-            coarse_weight=args.hspm_coarse_loss_weight,
-            sdf_weight=args.sdfr_sdf_loss_weight,
-            boundary_temperature=args.sdfr_boundary_temperature,
-            boundary_emphasis=args.sdfr_boundary_emphasis,
-        ).to(device)
-    elif args.model in APBR_MODELS:
-        criterion = losses.__dict__["APBRLoss"](
-            coarse_weight=args.apbr_coarse_loss_weight,
-            intermediate_weight=args.apbr_intermediate_loss_weight,
-            boundary_weight=args.apbr_boundary_loss_weight,
-        ).to(device)
-    elif args.model == "CMUNeXt_HSPM_UBRD":
-        criterion = losses.__dict__["UBRDLoss"](
-            coarse_weight=args.hspm_coarse_loss_weight,
-            boundary_weight=args.ubrd_boundary_loss_weight,
-        ).to(device)
-    elif args.model in HSPM_FBDM_MODELS:
+    if args.model in HSPM_FBDM_MODELS:
         criterion = losses.__dict__["HSPMFBDMLoss"](
             coarse_weight=args.hspm_coarse_loss_weight,
             edge_weight=args.fbdm_edge_loss_weight,
