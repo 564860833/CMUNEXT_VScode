@@ -5,15 +5,15 @@ from unittest import mock
 
 import numpy as np
 from albumentations import (
-    GaussNoise,
     GaussianBlur,
-    GridDistortion,
+    HorizontalFlip,
     MultiplicativeNoise,
     OneOf,
     RandomBrightnessContrast,
     RandomGamma,
     RandomRotate90,
     Resize,
+    ShiftScaleRotate,
 )
 from albumentations.augmentations import transforms
 
@@ -23,11 +23,8 @@ with mock.patch.object(sys, "argv", ["main.py"]):
 
 class HSPMAugmentationTests(unittest.TestCase):
     @staticmethod
-    def _args(use_extra_aug, profile="legacy"):
-        return Namespace(
-            use_extra_aug=use_extra_aug,
-            extra_aug_profile=profile,
-        )
+    def _args(use_extra_aug):
+        return Namespace(use_extra_aug=use_extra_aug)
 
     @staticmethod
     def _types(compose):
@@ -41,49 +38,12 @@ class HSPMAugmentationTests(unittest.TestCase):
             [RandomRotate90, transforms.Flip, Resize, transforms.Normalize],
         )
 
-    def test_extra_augmentation_profile_defaults_to_legacy(self):
+    def test_extra_augmentation_profile_argument_is_removed(self):
         args = training_main.parser.parse_args([])
+        self.assertFalse(hasattr(args, "extra_aug_profile"))
 
-        self.assertEqual(args.extra_aug_profile, "legacy")
-
-    def test_legacy_profile_matches_existing_extra_augmentation(self):
+    def test_extra_augmentation_uses_mild_image_style_perturbations(self):
         augmentation = training_main.build_train_transform(self._args(True), 64)
-
-        self.assertEqual(
-            self._types(augmentation),
-            [
-                RandomRotate90,
-                transforms.Flip,
-                GridDistortion,
-                OneOf,
-                GaussianBlur,
-                Resize,
-                transforms.Normalize,
-            ],
-        )
-        self.assertEqual(
-            self._types(augmentation.transforms[3]),
-            [RandomBrightnessContrast, RandomGamma, GaussNoise],
-        )
-        grid_distortion = augmentation.transforms[2]
-        style_augmentations = augmentation.transforms[3]
-        blur = augmentation.transforms[4]
-        self.assertEqual(grid_distortion.num_steps, 5)
-        self.assertEqual(grid_distortion.distort_limit, (-0.05, 0.05))
-        self.assertAlmostEqual(grid_distortion.p, 0.15)
-        self.assertAlmostEqual(style_augmentations.p, 0.3)
-        self.assertEqual(style_augmentations.transforms[0].brightness_limit, (-0.15, 0.15))
-        self.assertEqual(style_augmentations.transforms[0].contrast_limit, (-0.15, 0.15))
-        self.assertEqual(style_augmentations.transforms[1].gamma_limit, (85, 115))
-        self.assertEqual(style_augmentations.transforms[2].var_limit, (10.0, 40.0))
-        self.assertEqual(blur.blur_limit, (3, 5))
-        self.assertAlmostEqual(blur.p, 0.15)
-
-    def test_hspm_safe_uses_only_mild_image_style_perturbations(self):
-        augmentation = training_main.build_train_transform(
-            self._args(True, "hspm_safe"),
-            64,
-        )
         top_level_types = self._types(augmentation)
         style_augmentations = augmentation.transforms[2]
         style_types = self._types(style_augmentations)
@@ -91,36 +51,40 @@ class HSPMAugmentationTests(unittest.TestCase):
         self.assertEqual(
             top_level_types,
             [
-                RandomRotate90,
-                transforms.Flip,
+                HorizontalFlip,
+                ShiftScaleRotate,
                 OneOf,
+                MultiplicativeNoise,
                 GaussianBlur,
                 Resize,
                 transforms.Normalize,
             ],
         )
-        self.assertNotIn(GridDistortion, top_level_types)
-        self.assertNotIn(GaussNoise, style_types)
         self.assertEqual(
             style_types,
-            [RandomBrightnessContrast, RandomGamma, MultiplicativeNoise],
+            [RandomBrightnessContrast, RandomGamma],
         )
 
-        multiplicative_noise = style_augmentations.transforms[2]
+        affine = augmentation.transforms[1]
+        multiplicative_noise = augmentation.transforms[3]
+        self.assertEqual(affine.shift_limit_x, (-0.04, 0.04))
+        self.assertEqual(affine.shift_limit_y, (-0.04, 0.04))
+        self.assertEqual(affine.scale_limit, (0.92, 1.08))
+        self.assertEqual(affine.rotate_limit, (-12, 12))
+        self.assertAlmostEqual(affine.p, 0.4)
         self.assertEqual(style_augmentations.transforms[0].brightness_limit, (-0.1, 0.1))
         self.assertEqual(style_augmentations.transforms[0].contrast_limit, (-0.1, 0.1))
         self.assertEqual(style_augmentations.transforms[1].gamma_limit, (90, 110))
-        self.assertEqual(multiplicative_noise.multiplier, (0.95, 1.05))
+        self.assertAlmostEqual(style_augmentations.p, 0.35)
+        self.assertEqual(multiplicative_noise.multiplier, (0.97, 1.03))
         self.assertFalse(multiplicative_noise.per_channel)
         self.assertTrue(multiplicative_noise.elementwise)
-        self.assertEqual(augmentation.transforms[3].blur_limit, (3, 3))
-        self.assertAlmostEqual(augmentation.transforms[3].p, 0.05)
+        self.assertAlmostEqual(multiplicative_noise.p, 0.20)
+        self.assertEqual(augmentation.transforms[4].blur_limit, (3, 3))
+        self.assertAlmostEqual(augmentation.transforms[4].p, 0.05)
 
-    def test_hspm_safe_keeps_mask_binary_and_resizes_image_and_mask(self):
-        augmentation = training_main.build_train_transform(
-            self._args(True, "hspm_safe"),
-            64,
-        )
+    def test_extra_augmentation_keeps_mask_binary_and_resizes_image_and_mask(self):
+        augmentation = training_main.build_train_transform(self._args(True), 64)
         image = np.full((40, 52, 3), 128, dtype=np.uint8)
         mask = np.zeros((40, 52), dtype=np.uint8)
         mask[10:30, 18:38] = 255
@@ -130,13 +94,6 @@ class HSPMAugmentationTests(unittest.TestCase):
         self.assertEqual(result["image"].shape, (64, 64, 3))
         self.assertEqual(result["mask"].shape, (64, 64))
         self.assertTrue(set(np.unique(result["mask"])).issubset({0, 255}))
-
-    def test_hspm_safe_requires_extra_augmentation_flag(self):
-        with self.assertRaisesRegex(ValueError, "requires --use_extra_aug"):
-            training_main.build_train_transform(
-                self._args(False, "hspm_safe"),
-                64,
-            )
 
 
 if __name__ == "__main__":

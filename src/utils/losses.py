@@ -249,13 +249,21 @@ class HSPMFBDMLoss(nn.Module):
 
 
 class FBDMLoss(nn.Module):
-    def __init__(self, edge_weight=0.05, edge_kernel_size=3):
+    def __init__(self, edge_weight=0.05, edge_kernel_size=3, x2_edge_ratio=0.3):
         super().__init__()
         if edge_weight < 0:
             raise ValueError("edge_weight must be non-negative.")
+        if not 0.0 < x2_edge_ratio <= 1.0:
+            raise ValueError("x2_edge_ratio must be in (0, 1].")
         self.edge_weight = float(edge_weight)
         self.edge_kernel_size = int(edge_kernel_size)
+        self.x2_edge_ratio = float(x2_edge_ratio)
         self.seg_loss = BCEDiceLoss()
+
+    def _edge_target(self, target, size):
+        if target.shape[-2:] != size:
+            target = F.interpolate(target, size=size, mode="nearest")
+        return mask_to_edge(target, kernel_size=self.edge_kernel_size)
 
     def forward(self, outputs, target, edge_weight=None, return_components=False):
         if not isinstance(outputs, dict):
@@ -272,10 +280,16 @@ class FBDMLoss(nn.Module):
         if current_edge_weight > 0:
             if "edge" not in outputs:
                 raise KeyError("FBDMLoss requires an 'edge' output key when edge_weight > 0.")
-            edge_target = mask_to_edge(target, kernel_size=self.edge_kernel_size)
-            if edge_target.shape[-2:] != outputs["edge"].shape[-2:]:
-                edge_target = F.interpolate(edge_target, size=outputs["edge"].shape[-2:], mode="nearest")
-            edge_weighted = current_edge_weight * self.seg_loss(outputs["edge"], edge_target)
+            edge_target = self._edge_target(target, outputs["edge"].shape[-2:])
+            primary_edge_loss = self.seg_loss(outputs["edge"], edge_target)
+            if "edge_x2" in outputs:
+                x2_target = self._edge_target(target, outputs["edge_x2"].shape[-2:])
+                x2_edge_loss = self.seg_loss(outputs["edge_x2"], x2_target)
+                x1_weight = current_edge_weight / (1.0 + self.x2_edge_ratio)
+                x2_weight = x1_weight * self.x2_edge_ratio
+                edge_weighted = x1_weight * primary_edge_loss + x2_weight * x2_edge_loss
+            else:
+                edge_weighted = current_edge_weight * primary_edge_loss
 
         total = seg + edge_weighted
         if not return_components:

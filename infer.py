@@ -122,6 +122,36 @@ def parse_uslgsf_stages(value):
     return tuple(stages)
 
 
+def parse_fbdm_stages(value):
+    if isinstance(value, (tuple, list)):
+        items = value
+    else:
+        items = str(value).split(",")
+
+    stages = []
+    for item in items:
+        item = str(item).strip()
+        if not item:
+            raise argparse.ArgumentTypeError(
+                "fbdm_stages must be 0, 1, or a comma-separated pair 0,1."
+            )
+        try:
+            stage = int(item)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                "fbdm_stages values must be integers 0 and/or 1."
+            ) from exc
+        if stage not in {0, 1}:
+            raise argparse.ArgumentTypeError("fbdm_stages values must be 0 and/or 1.")
+        if stage not in stages:
+            stages.append(stage)
+
+    normalized = tuple(sorted(stages))
+    if normalized not in {(0,), (1,), (0, 1)}:
+        raise argparse.ArgumentTypeError("fbdm_stages must be one of: 0, 1, or 0,1.")
+    return normalized
+
+
 def parse_uslgsf_smooth_kernels(value):
     if isinstance(value, (tuple, list)):
         kernels = tuple(int(kernel) for kernel in value)
@@ -184,7 +214,10 @@ def build_model(args, parser):
             fbdm_edge_aux_only=args.fbdm_edge_aux_only,
         )
     elif args.model == FBDM_BEST0616_MODEL:
-        model = cmunext_fbdm_best0616(num_classes=args.num_classes)
+        model = cmunext_fbdm_best0616(
+            num_classes=args.num_classes,
+            fbdm_stages=args.fbdm_stages,
+        )
     elif args.model == "CMUNeXt_USLGSF":
         model = cmunext_uslgsf(
             num_classes=args.num_classes,
@@ -783,6 +816,10 @@ if __name__ == "__main__":
                         help="Maximum effective FBDM residual strength")
     parser.add_argument("--fbdm_edge_aux_only", action="store_true",
                         help="Use FBDM only as an edge auxiliary branch without residual injection")
+    parser.add_argument("--fbdm_stages", type=parse_fbdm_stages, default=(0,),
+                        help="Best0616 edge supervision stages: 0, 1, or 0,1")
+    parser.add_argument("--fbdm_x2_edge_ratio", type=float, default=0.30,
+                        help="Relative x2/x1 edge-loss weight when Best0616 uses stages 0,1")
     parser.add_argument("--fbdm_edge_loss_weight", type=float, default=0.05,
                         help="Auxiliary edge loss weight for FBDM models")
     parser.add_argument("--fbdm_edge_kernel_size", type=int, default=3,
@@ -832,6 +869,8 @@ if __name__ == "__main__":
         parser.error("--fbdm_gate_init must be in (0, --fbdm_gate_max).")
     if args.fbdm_edge_loss_weight < 0:
         parser.error("--fbdm_edge_loss_weight must be non-negative.")
+    if not 0.0 < args.fbdm_x2_edge_ratio <= 1.0:
+        parser.error("--fbdm_x2_edge_ratio must be in (0, 1].")
     if args.fbdm_edge_kernel_size <= 0 or args.fbdm_edge_kernel_size % 2 == 0:
         parser.error("--fbdm_edge_kernel_size must be a positive odd integer.")
     if not 0.0 < args.fbdm_correction_scale_init < args.fbdm_correction_scale_max:
@@ -888,6 +927,7 @@ if __name__ == "__main__":
         criterion = losses.__dict__["FBDMLoss"](
             edge_weight=args.fbdm_edge_loss_weight,
             edge_kernel_size=args.fbdm_edge_kernel_size,
+            x2_edge_ratio=args.fbdm_x2_edge_ratio,
         ).to(device)
     elif args.model in HSPM_ONLY_MODELS:
         criterion = losses.__dict__["HSPMLoss"](coarse_weight=args.hspm_coarse_loss_weight).to(device)

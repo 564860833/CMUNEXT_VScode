@@ -84,9 +84,9 @@ Then, training and validating your dataset:
 python main.py --model [MobileUViT/CMUNeXt/CMUNet/MK_UNet/TransUnet/...] --base_dir ./data/busi --train_file_dir busi_train.txt --val_file_dir busi_val.txt --base_lr 0.01 --epoch 300 --batch_size 8
 ```
 
-### Extra augmentation profiles
+### Conservative extra augmentation
 
-`--use_extra_aug` keeps the existing `legacy` augmentation profile by default. For HSPM experiments, `hspm_safe` protects lesion geometry by using only mild image-style perturbations and requires `--use_extra_aug`:
+`--use_extra_aug` replaces the basic augmentation pipeline with an ultrasound-aware one: horizontal flip, small affine changes (up to 12 degrees rotation, 4% translation, and 8% scale), limited brightness/contrast or gamma changes, light multiplicative noise, and low-probability 3x3 blur. It does not use `RandomRotate90` or the generic vertical-capable `Flip`. The previous `legacy` profile and `--extra_aug_profile` option have been removed.
 
 ```bash
 python main.py --model CMUNeXt_HSPM \
@@ -97,8 +97,24 @@ python main.py --model CMUNeXt_HSPM \
   --hspm_fusion_mode global \
   --hspm_mixer_mode legacy \
   --hspm_coarse_loss_weight 0.1 \
-  --use_extra_aug --extra_aug_profile hspm_safe
+  --use_extra_aug
 ```
+
+### Best0616 FBDM edge stages
+
+`CMUNeXt_FBDM_Best0616` keeps the full FBDM branch at `x1` by default. Use
+`--fbdm_stages` to select `x1` (`0`), the lightweight `x2` edge head (`1`),
+or both (`0,1`). In the dual-stage mode, `--fbdm_x2_edge_ratio` sets the x2/x1
+loss ratio while the total scheduled edge-loss weight remains unchanged:
+
+```bash
+python main.py --model CMUNeXt_FBDM_Best0616 \
+  --fbdm_stages 0,1 \
+  --fbdm_x2_edge_ratio 0.30
+```
+
+Use the same `--fbdm_stages` value for training and inference. The default
+`--fbdm_stages 0` remains compatible with existing Best0616 checkpoints.
 
 ### US-LGSF skip fusion
 

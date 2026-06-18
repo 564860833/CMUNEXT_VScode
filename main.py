@@ -2,6 +2,7 @@ import os
 import argparse
 import json
 import random
+import cv2
 import numpy as np
 import torch
 import torch.optim as optim
@@ -12,11 +13,16 @@ import sys  # <=== 新增 2: 导入 sys 模块
 import matplotlib.pyplot as plt  # <=== 新增 3: 导入 matplotlib
 
 from torch.utils.data import DataLoader
-from src.dataloader.dataset import MedicalDataSets
+from src.dataloader.dataset import (
+    MedicalDataSets,
+    TARGETED_SAMPLING_GROUPS,
+    TrackingWeightedRandomSampler,
+    build_targeted_sampling_metadata,
+)
 from albumentations.augmentations import transforms
 from albumentations.core.composition import Compose
-from albumentations import RandomRotate90, Resize, RandomBrightnessContrast, \
-    GaussNoise, OneOf, RandomGamma, GaussianBlur, GridDistortion, MultiplicativeNoise
+from albumentations import HorizontalFlip, RandomRotate90, Resize, RandomBrightnessContrast, \
+    OneOf, RandomGamma, GaussianBlur, MultiplicativeNoise, ShiftScaleRotate
 
 import src.utils.losses as losses
 from src.utils.util import AverageMeter
@@ -148,6 +154,36 @@ def parse_uslgsf_stages(value):
     return tuple(stages)
 
 
+def parse_fbdm_stages(value):
+    if isinstance(value, (tuple, list)):
+        items = value
+    else:
+        items = str(value).split(",")
+
+    stages = []
+    for item in items:
+        item = str(item).strip()
+        if not item:
+            raise argparse.ArgumentTypeError(
+                "fbdm_stages must be 0, 1, or a comma-separated pair 0,1."
+            )
+        try:
+            stage = int(item)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                "fbdm_stages values must be integers 0 and/or 1."
+            ) from exc
+        if stage not in {0, 1}:
+            raise argparse.ArgumentTypeError("fbdm_stages values must be 0 and/or 1.")
+        if stage not in stages:
+            stages.append(stage)
+
+    normalized = tuple(sorted(stages))
+    if normalized not in {(0,), (1,), (0, 1)}:
+        raise argparse.ArgumentTypeError("fbdm_stages must be one of: 0, 1, or 0,1.")
+    return normalized
+
+
 def parse_uslgsf_smooth_kernels(value):
     if isinstance(value, (tuple, list)):
         kernels = tuple(int(kernel) for kernel in value)
@@ -238,9 +274,19 @@ parser.add_argument('--seed', type=int, default=41, help='random seed')
 parser.add_argument('--save_dir', type=str, default="./checkpoint", help='directory to save the best model')
 # <=== 新增：是否开启额外数据增强的指令
 parser.add_argument('--use_extra_aug', action='store_true', help='Whether to use conservative extra data augmentations')
-parser.add_argument('--extra_aug_profile', type=str, default='legacy',
-                    choices=['legacy', 'hspm_safe'],
-                    help='Extra augmentation profile; hspm_safe requires --use_extra_aug')
+parser.add_argument('--sampling_mode', type=str, default='uniform',
+                    choices=['uniform', 'targeted'],
+                    help='Uniform shuffling or BUSI pathology-and-size targeted sampling')
+parser.add_argument('--targeted_small_area_threshold', type=float, default=0.05,
+                    help='Upper-exclusive lesion area ratio for the targeted small bucket')
+parser.add_argument('--targeted_large_area_threshold', type=float, default=0.20,
+                    help='Upper-inclusive lesion area ratio for the targeted medium bucket')
+parser.add_argument('--targeted_malignant_small_weight', type=float, default=1.2,
+                    help='Sampling weight for small malignant BUSI cases')
+parser.add_argument('--targeted_malignant_medium_weight', type=float, default=1.8,
+                    help='Sampling weight for medium malignant BUSI cases')
+parser.add_argument('--targeted_malignant_large_weight', type=float, default=1.3,
+                    help='Sampling weight for large malignant BUSI cases')
 parser.add_argument('--ddsr_stages', type=parse_ddsr_stages, default=(0, 1),
                     help='Comma-separated DDSR stages for CMUNeXt_SpeckleEnhance, e.g. 0,1 or 2,3 or 0,1,2,3')
 parser.add_argument('--ddsr_smooth_k', type=int, default=5,
@@ -319,6 +365,10 @@ parser.add_argument('--fbdm_gate_max', type=float, default=0.2,
                     help='Maximum effective FBDM residual strength')
 parser.add_argument('--fbdm_edge_aux_only', action='store_true',
                     help='Train FBDM edge auxiliary branch without injecting its residual into the segmentation path')
+parser.add_argument('--fbdm_stages', type=parse_fbdm_stages, default=(0,),
+                    help='Best0616 edge supervision stages: 0, 1, or 0,1')
+parser.add_argument('--fbdm_x2_edge_ratio', type=float, default=0.30,
+                    help='Relative x2/x1 edge-loss weight when Best0616 uses stages 0,1')
 parser.add_argument('--fbdm_edge_loss_weight', type=float, default=0.05,
                     help='Auxiliary edge loss weight for FBDM models')
 parser.add_argument('--fbdm_edge_loss_final_weight', type=float, default=None,
@@ -379,7 +429,10 @@ def get_model(args):
             fbdm_edge_aux_only=args.fbdm_edge_aux_only,
         ).cuda()
     elif args.model == FBDM_BEST0616_MODEL:
-        model = cmunext_fbdm_best0616(num_classes=args.num_classes).cuda()
+        model = cmunext_fbdm_best0616(
+            num_classes=args.num_classes,
+            fbdm_stages=args.fbdm_stages,
+        ).cuda()
     elif args.model == "CMUNeXt_USLGSF":
         model = cmunext_uslgsf(
             num_classes=args.num_classes,
@@ -543,6 +596,7 @@ def get_criterion(args):
         return losses.__dict__['FBDMLoss'](
             edge_weight=args.fbdm_edge_loss_weight,
             edge_kernel_size=args.fbdm_edge_kernel_size,
+            x2_edge_ratio=args.fbdm_x2_edge_ratio,
         ).cuda()
     if args.model in HSPM_ONLY_MODELS:
         return losses.__dict__['HSPMLoss'](coarse_weight=args.hspm_coarse_loss_weight).cuda()
@@ -762,18 +816,79 @@ def update_loss_component_meters(avg_meters, components, prefix, batch_size):
         avg_meters[meter_name].update(float(value.detach().cpu()), batch_size)
 
 
-def validate_augmentation_args(args):
-    profile = getattr(args, "extra_aug_profile", "legacy")
-    if profile not in {"legacy", "hspm_safe"}:
-        raise ValueError("extra_aug_profile must be one of: legacy, hspm_safe.")
-    if profile == "hspm_safe" and not args.use_extra_aug:
-        raise ValueError("--extra_aug_profile hspm_safe requires --use_extra_aug.")
+def validate_sampling_args(args):
+    if args.sampling_mode not in {'uniform', 'targeted'}:
+        raise ValueError("sampling_mode must be either 'uniform' or 'targeted'.")
+    if not (
+        0.0
+        <= args.targeted_small_area_threshold
+        < args.targeted_large_area_threshold
+        <= 1.0
+    ):
+        raise ValueError(
+            'Targeted sampling area thresholds must satisfy '
+            '0 <= small_threshold < large_threshold <= 1.'
+        )
+    targeted_weights = (
+        args.targeted_malignant_small_weight,
+        args.targeted_malignant_medium_weight,
+        args.targeted_malignant_large_weight,
+    )
+    if any(weight <= 0.0 for weight in targeted_weights):
+        raise ValueError('Targeted sampling weights must be positive.')
+
+
+def _format_sampling_groups(values, float_values=False):
+    if float_values:
+        return ', '.join(
+            f'{group}={float(values.get(group, 0.0)):.1f}'
+            for group in TARGETED_SAMPLING_GROUPS
+        )
+    return ', '.join(
+        f'{group}={int(values.get(group, 0))}'
+        for group in TARGETED_SAMPLING_GROUPS
+    )
+
+
+def build_train_sampler(args, dataset):
+    validate_sampling_args(args)
+    if args.sampling_mode == 'uniform':
+        return None
+
+    metadata = build_targeted_sampling_metadata(
+        base_dir=args.base_dir,
+        sample_list=dataset.sample_list,
+        small_threshold=args.targeted_small_area_threshold,
+        large_threshold=args.targeted_large_area_threshold,
+        malignant_small_weight=args.targeted_malignant_small_weight,
+        malignant_medium_weight=args.targeted_malignant_medium_weight,
+        malignant_large_weight=args.targeted_malignant_large_weight,
+    )
+    generator = torch.Generator()
+    generator.manual_seed(args.seed)
+    sampler = TrackingWeightedRandomSampler(
+        weights=metadata.weights,
+        num_samples=len(dataset),
+        replacement=True,
+        generator=generator,
+        groups=metadata.groups,
+    )
+    logging.info(
+        '=> Targeted sampling enabled: samples_per_epoch=%d, replacement=True.',
+        len(dataset),
+    )
+    logging.info(
+        '=> Targeted sampling source counts: %s',
+        _format_sampling_groups(metadata.original_counts),
+    )
+    logging.info(
+        '=> Targeted sampling expected counts: %s',
+        _format_sampling_groups(metadata.expected_counts, float_values=True),
+    )
+    return sampler
 
 
 def build_train_transform(args, img_size):
-    validate_augmentation_args(args)
-    profile = getattr(args, "extra_aug_profile", "legacy")
-
     if not args.use_extra_aug:
         logging.info("=> Using BASIC data augmentation.")
         return Compose([
@@ -783,36 +898,30 @@ def build_train_transform(args, img_size):
             transforms.Normalize(),
         ])
 
-    logging.info("=> Enabled EXTRA data augmentation profile: %s.", profile)
-    if profile == "hspm_safe":
-        return Compose([
-            RandomRotate90(p=0.5),
-            transforms.Flip(p=0.5),
-            OneOf([
-                RandomBrightnessContrast(brightness_limit=0.10, contrast_limit=0.10, p=1.0),
-                RandomGamma(gamma_limit=(90, 110), p=1.0),
-                MultiplicativeNoise(
-                    multiplier=(0.95, 1.05),
-                    per_channel=False,
-                    elementwise=True,
-                    p=1.0,
-                ),
-            ], p=0.30),
-            GaussianBlur(blur_limit=(3, 3), p=0.05),
-            Resize(img_size, img_size),
-            transforms.Normalize(),
-        ])
-
+    logging.info("=> Enabled conservative EXTRA data augmentation.")
     return Compose([
-        RandomRotate90(p=0.5),
-        transforms.Flip(p=0.5),
-        GridDistortion(num_steps=5, distort_limit=0.05, p=0.15),
+        HorizontalFlip(p=0.5),
+        ShiftScaleRotate(
+            shift_limit=0.04,
+            scale_limit=0.08,
+            rotate_limit=12,
+            interpolation=cv2.INTER_LINEAR,
+            border_mode=cv2.BORDER_CONSTANT,
+            value=0,
+            mask_value=0,
+            p=0.4,
+        ),
         OneOf([
-            RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=1.0),
-            RandomGamma(gamma_limit=(85, 115), p=1.0),
-            GaussNoise(var_limit=(10.0, 40.0), p=1.0),
-        ], p=0.3),
-        GaussianBlur(blur_limit=(3, 5), p=0.15),
+            RandomBrightnessContrast(brightness_limit=0.10, contrast_limit=0.10, p=1.0),
+            RandomGamma(gamma_limit=(90, 110), p=1.0),
+        ], p=0.35),
+        MultiplicativeNoise(
+            multiplier=(0.97, 1.03),
+            per_channel=False,
+            elementwise=True,
+            p=0.20,
+        ),
+        GaussianBlur(blur_limit=(3, 3), p=0.05),
         Resize(img_size, img_size),
         transforms.Normalize(),
     ])
@@ -839,14 +948,22 @@ def getDataloader(args):
     # <=== 修改 5: 将 print 替换为 logging.info
     logging.info("train num:{}, val num:{}".format(len(db_train), len(db_val)))
 
-    trainloader = DataLoader(db_train, batch_size=args.batch_size, shuffle=True, num_workers=8, pin_memory=False)
+    train_sampler = build_train_sampler(args, db_train)
+    trainloader = DataLoader(
+        db_train,
+        batch_size=args.batch_size,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
+        num_workers=8,
+        pin_memory=False,
+    )
     valloader = DataLoader(db_val, batch_size=args.batch_size, shuffle=False, num_workers=4)
 
     return trainloader, valloader
 
 
 def main(args):
-    validate_augmentation_args(args)
+    validate_sampling_args(args)
     if args.model in USLGSF_V3_MODELS:
         if args.uslgsf_residual_init_scale <= 0:
             raise ValueError("USLGSF V3 residual initialization scale must be positive.")
@@ -864,6 +981,8 @@ def main(args):
         raise ValueError("fbdm_gate_init must be in (0, fbdm_gate_max).")
     if args.fbdm_edge_loss_weight < 0:
         raise ValueError("fbdm_edge_loss_weight must be non-negative.")
+    if not 0.0 < args.fbdm_x2_edge_ratio <= 1.0:
+        raise ValueError("fbdm_x2_edge_ratio must be in (0, 1].")
     if args.fbdm_edge_loss_final_weight is not None and args.fbdm_edge_loss_final_weight < 0:
         raise ValueError("fbdm_edge_loss_final_weight must be non-negative.")
     if args.fbdm_edge_loss_decay_epochs < 0 or args.fbdm_residual_warmup_epochs < 0:
@@ -1163,6 +1282,14 @@ def main(args):
                 avg_meters['val_ACC'].update(val_metrics['acc'], val_sample_count)
 
         # <=== 修改 8: 将 print 替换为 logging.info
+        if isinstance(trainloader.sampler, TrackingWeightedRandomSampler):
+            logging.info(
+                'Targeted sampling actual counts [epoch %d/%d]: %s',
+                epoch_num,
+                max_epoch,
+                _format_sampling_groups(trainloader.sampler.last_group_counts()),
+            )
+
         elapsed_time = time.time() - start_time
         elapsed_str = time.strftime('%H:%M:%S', time.gmtime(elapsed_time))
         if args.model in HSPM_MODELS:

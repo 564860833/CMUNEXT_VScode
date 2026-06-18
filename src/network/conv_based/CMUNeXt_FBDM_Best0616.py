@@ -274,6 +274,42 @@ class FBDM(nn.Module):
         return x, edge_logits
 
 
+class LightweightEdgeHead(nn.Module):
+    def __init__(self, channels, edge_channels=1):
+        super().__init__()
+        if channels <= 0:
+            raise ValueError("channels must be positive.")
+        if edge_channels <= 0:
+            raise ValueError("edge_channels must be positive.")
+
+        self.head = nn.Sequential(
+            nn.Conv2d(
+                channels,
+                channels,
+                kernel_size=3,
+                padding=1,
+                groups=channels,
+                bias=False,
+            ),
+            nn.BatchNorm2d(channels),
+            nn.GELU(),
+            nn.Conv2d(channels, edge_channels, kernel_size=1),
+        )
+
+    def forward(self, x):
+        return self.head(x)
+
+
+def _normalize_fbdm_stages(stages):
+    try:
+        normalized = tuple(sorted(set(int(stage) for stage in stages)))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("fbdm_stages must contain only stages 0 and/or 1.") from exc
+    if normalized not in {(0,), (1,), (0, 1)}:
+        raise ValueError("fbdm_stages must be one of: (0,), (1,), or (0, 1).")
+    return normalized
+
+
 class CMUNeXt_FBDM_Best0616(nn.Module):
     def __init__(
         self,
@@ -282,8 +318,10 @@ class CMUNeXt_FBDM_Best0616(nn.Module):
         dims=(16, 32, 128, 160, 256),
         depths=(1, 1, 1, 3, 1),
         kernels=(3, 3, 7, 7, 7),
+        fbdm_stages=(0,),
     ):
         super().__init__()
+        self.fbdm_stages = _normalize_fbdm_stages(fbdm_stages)
         self.Maxpool = nn.MaxPool2d(kernel_size=2, stride=2)
         self.stem = conv_block(ch_in=input_channel, ch_out=dims[0])
         self.encoder1 = CMUNeXtBlock(ch_in=dims[0], ch_out=dims[0], depth=depths[0], k=kernels[0])
@@ -302,7 +340,16 @@ class CMUNeXt_FBDM_Best0616(nn.Module):
         self.Up_conv2 = fusion_conv(ch_in=dims[0] * 2, ch_out=dims[0])
         self.Conv_1x1 = nn.Conv2d(dims[0], num_classes, kernel_size=1, stride=1, padding=0)
 
-        self.fbdm1 = FBDM(channels=dims[0], edge_channels=num_classes)
+        self.fbdm1 = (
+            FBDM(channels=dims[0], edge_channels=num_classes)
+            if 0 in self.fbdm_stages
+            else None
+        )
+        self.x2_edge_head = (
+            LightweightEdgeHead(channels=dims[1], edge_channels=num_classes)
+            if 1 in self.fbdm_stages
+            else None
+        )
 
     def forward(self, x):
         x1 = self.encoder1(self.stem(x))
@@ -320,13 +367,24 @@ class CMUNeXt_FBDM_Best0616(nn.Module):
         d3 = self.Up3(d4)
         d3 = self.Up_conv3(torch.cat((x2, d3), dim=1))
 
-        x1_fbdm, edge_logits = self.fbdm1(x1)
+        edge_outputs = {}
+        x1_skip = x1
+        if self.fbdm1 is not None:
+            x1_skip, edge_logits = self.fbdm1(x1)
+            edge_outputs["edge"] = edge_logits
+        if self.x2_edge_head is not None:
+            x2_edge_logits = self.x2_edge_head(x2)
+            if self.fbdm1 is None:
+                edge_outputs["edge"] = x2_edge_logits
+            else:
+                edge_outputs["edge_x2"] = x2_edge_logits
+
         d2 = self.Up2(d3)
-        d2 = self.Up_conv2(torch.cat((x1_fbdm, d2), dim=1))
+        d2 = self.Up_conv2(torch.cat((x1_skip, d2), dim=1))
 
         return {
             "seg": self.Conv_1x1(d2),
-            "edge": edge_logits,
+            **edge_outputs,
         }
 
 
@@ -336,6 +394,7 @@ def cmunext_fbdm_best0616(
     dims=(16, 32, 128, 160, 256),
     depths=(1, 1, 1, 3, 1),
     kernels=(3, 3, 7, 7, 7),
+    fbdm_stages=(0,),
 ):
     return CMUNeXt_FBDM_Best0616(
         input_channel=input_channel,
@@ -343,4 +402,5 @@ def cmunext_fbdm_best0616(
         dims=dims,
         depths=depths,
         kernels=kernels,
+        fbdm_stages=fbdm_stages,
     )
