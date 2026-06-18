@@ -116,6 +116,21 @@ python main.py --model CMUNeXt_FBDM_Best0616 \
 Use the same `--fbdm_stages` value for training and inference. The default
 `--fbdm_stages 0` remains compatible with existing Best0616 checkpoints.
 
+All FBDM models default to the legacy edge loss. Use balanced BCE-Dice to
+increase the contribution of sparse positive edge pixels:
+
+```bash
+python main.py --model CMUNeXt_FBDM_Best0616 \
+  --fbdm_stages 0,1 \
+  --fbdm_x2_edge_ratio 0.30 \
+  --fbdm_edge_loss_type balanced_bce_dice \
+  --fbdm_edge_pos_weight 20
+```
+
+The alternative `focal_dice` mode accepts `--fbdm_edge_focal_alpha` and
+`--fbdm_edge_focal_gamma`. These options change only the auxiliary edge
+criterion and do not change model checkpoint structure.
+
 ### US-LGSF skip fusion
 
 `CMUNeXt_USLGSF` replaces selected CMUNeXt skip connections with ultrasound

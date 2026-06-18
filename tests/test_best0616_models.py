@@ -112,13 +112,19 @@ class Best0616ModelTests(unittest.TestCase):
             "edge_x2": torch.zeros(1, 1, 8, 8),
         }
         criterion = FBDMLoss(edge_weight=0.03, x2_edge_ratio=0.3)
-        criterion.seg_loss = SequenceLoss((10.0, 2.0, 4.0))
+        criterion.seg_loss = SequenceLoss((10.0,))
+        criterion.edge_loss = SequenceLoss((2.0, 4.0))
 
         total, components = criterion(outputs, target, return_components=True)
         x1_weight = 0.03 / 1.3
         x2_weight = x1_weight * 0.3
         expected_edge = x1_weight * 2.0 + x2_weight * 4.0
 
+        self.assertAlmostEqual(
+            components["edge_raw"].item(),
+            expected_edge / 0.03,
+            places=6,
+        )
         self.assertAlmostEqual(components["edge_weighted"].item(), expected_edge, places=6)
         self.assertAlmostEqual(total.item(), 10.0 + expected_edge, places=6)
         self.assertAlmostEqual(x1_weight + x2_weight, 0.03, places=8)
@@ -128,13 +134,52 @@ class Best0616ModelTests(unittest.TestCase):
             "edge": torch.zeros(1, 1, 8, 8),
         }
         single_stage_criterion = FBDMLoss(edge_weight=0.03, x2_edge_ratio=0.3)
-        single_stage_criterion.seg_loss = SequenceLoss((10.0, 4.0))
+        single_stage_criterion.seg_loss = SequenceLoss((10.0,))
+        single_stage_criterion.edge_loss = SequenceLoss((4.0,))
         _, single_stage_components = single_stage_criterion(
             single_stage_outputs,
             target,
             return_components=True,
         )
+        self.assertAlmostEqual(single_stage_components["edge_raw"].item(), 4.0, places=6)
         self.assertAlmostEqual(single_stage_components["edge_weighted"].item(), 0.12, places=6)
+
+    def test_fbdm_multistage_diagnostics_follow_loss_ratio(self):
+        target = torch.zeros(1, 1, 16, 16)
+        target[:, :, 4:12, 4:12] = 1.0
+        outputs = {
+            "seg": torch.zeros(1, 1, 16, 16),
+            "edge": torch.zeros(1, 1, 16, 16),
+            "edge_x2": torch.full((1, 1, 8, 8), 2.0),
+        }
+        ratio = 0.25
+        criterion = FBDMLoss(edge_weight=0.03, x2_edge_ratio=ratio)
+
+        criterion(outputs, target)
+        diagnostics = criterion.get_edge_diagnostics()
+        x1_target = criterion._edge_target(target, (16, 16))
+        x2_target = criterion._edge_target(target, (8, 8))
+        x1_ratio = 1.0 / (1.0 + ratio)
+        x2_ratio = ratio / (1.0 + ratio)
+
+        expected_target_ratio = (
+            x1_ratio * x1_target.mean() + x2_ratio * x2_target.mean()
+        )
+        expected_probability = (
+            x1_ratio * torch.tensor(0.5)
+            + x2_ratio * torch.sigmoid(torch.tensor(2.0))
+        )
+        self.assertTrue(
+            torch.allclose(diagnostics["edge_target_ratio"], expected_target_ratio)
+        )
+        self.assertTrue(
+            torch.allclose(diagnostics["edge_prob_mean"], expected_probability)
+        )
+        self.assertAlmostEqual(
+            diagnostics["edge_pred_positive_ratio"].item(),
+            x2_ratio,
+            places=6,
+        )
 
     def test_fbdm_loss_resizes_mask_before_extracting_edge(self):
         target = torch.zeros(1, 1, 16, 16)
@@ -184,6 +229,31 @@ class Best0616ModelTests(unittest.TestCase):
         self.assertEqual(model.fbdm_stages, (1,))
         self.assertIsNone(model.fbdm1)
         self.assertIsNotNone(model.x2_edge_head)
+
+    def test_stage1_only_fbdm_schedule_has_no_residual_gate(self):
+        model = cmunext_fbdm_best0616(
+            dims=SMALL_DIMS,
+            depths=SMALL_DEPTHS,
+            kernels=SMALL_KERNELS,
+            fbdm_stages=(1,),
+        )
+        args = Namespace(
+            model=training_main.FBDM_BEST0616_MODEL,
+            fbdm_edge_loss_weight=0.03,
+            fbdm_edge_loss_final_weight=0.003,
+            fbdm_edge_loss_decay_epochs=150,
+            fbdm_residual_warmup_epochs=40,
+        )
+
+        edge_weight, residual_scale, effective_gamma = training_main.configure_fbdm_epoch(
+            args,
+            model,
+            epoch_num=20,
+        )
+
+        self.assertAlmostEqual(edge_weight, 0.0264)
+        self.assertAlmostEqual(residual_scale, 0.5)
+        self.assertEqual(effective_gamma, 0.0)
 
     def test_hspm_best0616_output_contract_and_fixed_structure(self):
         model = cmunext_hspm_best0616(
@@ -286,6 +356,45 @@ class Best0616ModelTests(unittest.TestCase):
         self.assertEqual(hspm_fbdm_args.hspm_coarse_loss_weight, 0.1)
         self.assertEqual(hspm_fbdm_args.hspm_coarse_loss_final_weight, 0.02)
         self.assertEqual(hspm_fbdm_args.hspm_coarse_loss_decay_epochs, 150)
+
+    def test_edge_loss_cli_defaults_and_best0616_presets_are_compatible(self):
+        self.assertEqual(training_main.args.fbdm_edge_loss_type, "legacy")
+        self.assertEqual(training_main.args.fbdm_edge_pos_weight, 20.0)
+        self.assertEqual(training_main.args.fbdm_edge_focal_alpha, 0.95)
+        self.assertEqual(training_main.args.fbdm_edge_focal_gamma, 2.0)
+
+        configured = training_main.apply_best0616_presets(
+            Namespace(
+                model=training_main.FBDM_BEST0616_MODEL,
+                fbdm_edge_loss_type="focal_dice",
+                fbdm_edge_pos_weight=12.0,
+                fbdm_edge_focal_alpha=0.9,
+                fbdm_edge_focal_gamma=1.5,
+            )
+        )
+        self.assertEqual(configured.fbdm_edge_loss_type, "focal_dice")
+        self.assertEqual(configured.fbdm_edge_pos_weight, 12.0)
+        self.assertEqual(configured.fbdm_edge_focal_alpha, 0.9)
+        self.assertEqual(configured.fbdm_edge_focal_gamma, 1.5)
+
+    def test_training_criterion_receives_edge_loss_options(self):
+        args = Namespace(
+            model=training_main.FBDM_BEST0616_MODEL,
+            fbdm_edge_loss_weight=0.03,
+            fbdm_edge_kernel_size=3,
+            fbdm_x2_edge_ratio=0.3,
+            fbdm_edge_loss_type="balanced_bce_dice",
+            fbdm_edge_pos_weight=15.0,
+            fbdm_edge_focal_alpha=0.9,
+            fbdm_edge_focal_gamma=1.5,
+        )
+        with mock.patch.object(torch.nn.Module, "cuda", lambda self: self):
+            criterion = training_main.get_criterion(args)
+
+        self.assertEqual(criterion.edge_loss.loss_type, "balanced_bce_dice")
+        self.assertEqual(criterion.edge_loss.pos_weight.item(), 15.0)
+        self.assertEqual(criterion.edge_loss.focal_alpha, 0.9)
+        self.assertEqual(criterion.edge_loss.focal_gamma, 1.5)
 
     def test_best0616_files_do_not_import_other_model_classes(self):
         for path in (

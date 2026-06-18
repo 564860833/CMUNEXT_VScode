@@ -820,6 +820,15 @@ if __name__ == "__main__":
                         help="Best0616 edge supervision stages: 0, 1, or 0,1")
     parser.add_argument("--fbdm_x2_edge_ratio", type=float, default=0.30,
                         help="Relative x2/x1 edge-loss weight when Best0616 uses stages 0,1")
+    parser.add_argument("--fbdm_edge_loss_type", type=str, default="legacy",
+                        choices=["legacy", "balanced_bce_dice", "focal_dice"],
+                        help="Edge supervision loss used by FBDM models")
+    parser.add_argument("--fbdm_edge_pos_weight", type=float, default=20.0,
+                        help="Positive-class weight for balanced FBDM edge BCE")
+    parser.add_argument("--fbdm_edge_focal_alpha", type=float, default=0.95,
+                        help="Positive-class alpha for focal FBDM edge loss")
+    parser.add_argument("--fbdm_edge_focal_gamma", type=float, default=2.0,
+                        help="Focusing gamma for focal FBDM edge loss")
     parser.add_argument("--fbdm_edge_loss_weight", type=float, default=0.05,
                         help="Auxiliary edge loss weight for FBDM models")
     parser.add_argument("--fbdm_edge_kernel_size", type=int, default=3,
@@ -869,6 +878,12 @@ if __name__ == "__main__":
         parser.error("--fbdm_gate_init must be in (0, --fbdm_gate_max).")
     if args.fbdm_edge_loss_weight < 0:
         parser.error("--fbdm_edge_loss_weight must be non-negative.")
+    if args.fbdm_edge_pos_weight <= 0:
+        parser.error("--fbdm_edge_pos_weight must be positive.")
+    if not 0.0 < args.fbdm_edge_focal_alpha < 1.0:
+        parser.error("--fbdm_edge_focal_alpha must be in (0, 1).")
+    if args.fbdm_edge_focal_gamma < 0:
+        parser.error("--fbdm_edge_focal_gamma must be non-negative.")
     if not 0.0 < args.fbdm_x2_edge_ratio <= 1.0:
         parser.error("--fbdm_x2_edge_ratio must be in (0, 1].")
     if args.fbdm_edge_kernel_size <= 0 or args.fbdm_edge_kernel_size % 2 == 0:
@@ -922,12 +937,20 @@ if __name__ == "__main__":
             edge_kernel_size=args.fbdm_edge_kernel_size,
             boundary_band_weight=args.fbdm_boundary_band_loss_weight,
             boundary_band_kernel_size=args.fbdm_boundary_band_kernel_size,
+            edge_loss_type=args.fbdm_edge_loss_type,
+            edge_pos_weight=args.fbdm_edge_pos_weight,
+            edge_focal_alpha=args.fbdm_edge_focal_alpha,
+            edge_focal_gamma=args.fbdm_edge_focal_gamma,
         ).to(device)
     elif args.model in FBDM_ONLY_MODELS:
         criterion = losses.__dict__["FBDMLoss"](
             edge_weight=args.fbdm_edge_loss_weight,
             edge_kernel_size=args.fbdm_edge_kernel_size,
             x2_edge_ratio=args.fbdm_x2_edge_ratio,
+            edge_loss_type=args.fbdm_edge_loss_type,
+            edge_pos_weight=args.fbdm_edge_pos_weight,
+            edge_focal_alpha=args.fbdm_edge_focal_alpha,
+            edge_focal_gamma=args.fbdm_edge_focal_gamma,
         ).to(device)
     elif args.model in HSPM_ONLY_MODELS:
         criterion = losses.__dict__["HSPMLoss"](coarse_weight=args.hspm_coarse_loss_weight).to(device)

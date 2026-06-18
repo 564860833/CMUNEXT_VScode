@@ -148,6 +148,39 @@ class HSPMFBDMTests(unittest.TestCase):
         self.assertIsNotNone(model.fbdm1.edge_head.weight.grad)
         self.assertIsNotNone(model.fbdm_correction.correction_head.weight.grad)
 
+    def test_hspm_fbdm_uses_configured_edge_loss_and_reports_diagnostics(self):
+        model = self._small_model(fbdm_edge_aux_only=True).eval()
+        target = torch.zeros(2, 1, 32, 32)
+        target[:, :, 8:24, 10:22] = 1.0
+        outputs = model(torch.randn(2, 3, 32, 32))
+        criterion = HSPMFBDMLoss(
+            coarse_weight=0.1,
+            edge_weight=0.03,
+            edge_loss_type="balanced_bce_dice",
+            edge_pos_weight=20.0,
+        )
+
+        total, components = criterion(outputs, target, return_components=True)
+        diagnostics = criterion.get_edge_diagnostics()
+
+        self.assertTrue(torch.isfinite(total))
+        self.assertEqual(criterion.edge_loss.loss_type, "balanced_bce_dice")
+        self.assertGreater(components["edge_raw"].item(), 0.0)
+        self.assertTrue(
+            torch.allclose(
+                components["edge_weighted"],
+                0.03 * components["edge_raw"],
+            )
+        )
+        self.assertEqual(
+            set(diagnostics),
+            {
+                "edge_target_ratio",
+                "edge_prob_mean",
+                "edge_pred_positive_ratio",
+            },
+        )
+
     def test_hspm_fbdm_v2_boundary_band_loss_components_sum(self):
         model = self._small_v2_model().eval()
         target = torch.zeros(2, 1, 32, 32)

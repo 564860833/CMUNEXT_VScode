@@ -92,6 +92,11 @@ FBDM_V2_DIAGNOSTIC_NAMES = (
     "logit_correction_abs_max",
     "prediction_flip_ratio",
 )
+FBDM_EDGE_DIAGNOSTIC_NAMES = (
+    "edge_target_ratio",
+    "edge_prob_mean",
+    "edge_pred_positive_ratio",
+)
 
 
 def seed_torch(seed):
@@ -369,6 +374,15 @@ parser.add_argument('--fbdm_stages', type=parse_fbdm_stages, default=(0,),
                     help='Best0616 edge supervision stages: 0, 1, or 0,1')
 parser.add_argument('--fbdm_x2_edge_ratio', type=float, default=0.30,
                     help='Relative x2/x1 edge-loss weight when Best0616 uses stages 0,1')
+parser.add_argument('--fbdm_edge_loss_type', type=str, default='legacy',
+                    choices=['legacy', 'balanced_bce_dice', 'focal_dice'],
+                    help='Edge supervision loss used by FBDM models')
+parser.add_argument('--fbdm_edge_pos_weight', type=float, default=20.0,
+                    help='Positive-class weight for balanced FBDM edge BCE')
+parser.add_argument('--fbdm_edge_focal_alpha', type=float, default=0.95,
+                    help='Positive-class alpha for focal FBDM edge loss')
+parser.add_argument('--fbdm_edge_focal_gamma', type=float, default=2.0,
+                    help='Focusing gamma for focal FBDM edge loss')
 parser.add_argument('--fbdm_edge_loss_weight', type=float, default=0.05,
                     help='Auxiliary edge loss weight for FBDM models')
 parser.add_argument('--fbdm_edge_loss_final_weight', type=float, default=None,
@@ -591,12 +605,20 @@ def get_criterion(args):
             edge_kernel_size=args.fbdm_edge_kernel_size,
             boundary_band_weight=args.fbdm_boundary_band_loss_weight,
             boundary_band_kernel_size=args.fbdm_boundary_band_kernel_size,
+            edge_loss_type=args.fbdm_edge_loss_type,
+            edge_pos_weight=args.fbdm_edge_pos_weight,
+            edge_focal_alpha=args.fbdm_edge_focal_alpha,
+            edge_focal_gamma=args.fbdm_edge_focal_gamma,
         ).cuda()
     if args.model in FBDM_ONLY_MODELS:
         return losses.__dict__['FBDMLoss'](
             edge_weight=args.fbdm_edge_loss_weight,
             edge_kernel_size=args.fbdm_edge_kernel_size,
             x2_edge_ratio=args.fbdm_x2_edge_ratio,
+            edge_loss_type=args.fbdm_edge_loss_type,
+            edge_pos_weight=args.fbdm_edge_pos_weight,
+            edge_focal_alpha=args.fbdm_edge_focal_alpha,
+            edge_focal_gamma=args.fbdm_edge_focal_gamma,
         ).cuda()
     if args.model in HSPM_ONLY_MODELS:
         return losses.__dict__['HSPMLoss'](coarse_weight=args.hspm_coarse_loss_weight).cuda()
@@ -765,12 +787,18 @@ def configure_fbdm_epoch(args, model, epoch_num):
     effective_gamma = None
     if args.model in FBDM_MODELS:
         fbdm_model = model.module if isinstance(model, torch.nn.DataParallel) else model
-        fbdm_model.fbdm1.set_residual_scale(residual_scale)
+        fbdm1 = getattr(fbdm_model, "fbdm1", None)
+        if fbdm1 is not None:
+            fbdm1.set_residual_scale(residual_scale)
         if args.model in HSPM_FBDM_V2_MODELS:
             fbdm_model.set_fbdm_correction_schedule_scale(
                 get_fbdm_correction_schedule_scale(args, epoch_num)
             )
-        effective_gamma = float(fbdm_model.fbdm1.effective_gamma().detach().cpu())
+        effective_gamma = (
+            0.0
+            if fbdm1 is None
+            else float(fbdm1.effective_gamma().detach().cpu())
+        )
     return edge_weight, residual_scale, effective_gamma
 
 
@@ -788,6 +816,16 @@ def get_hspm_fusion_diagnostics(model):
 def get_fbdm_v2_diagnostics(model):
     fbdm_model = model.module if isinstance(model, torch.nn.DataParallel) else model
     diagnostics = fbdm_model.get_fbdm_v2_diagnostics()
+    if diagnostics is None:
+        return None
+    return {
+        name: float(value.detach().cpu())
+        for name, value in diagnostics.items()
+    }
+
+
+def get_fbdm_edge_diagnostics(criterion):
+    diagnostics = criterion.get_edge_diagnostics()
     if diagnostics is None:
         return None
     return {
@@ -814,6 +852,14 @@ def update_loss_component_meters(avg_meters, components, prefix, batch_size):
     for name, value in components.items():
         meter_name = f"{prefix}_loss_{name}"
         avg_meters[meter_name].update(float(value.detach().cpu()), batch_size)
+
+
+def update_fbdm_edge_diagnostic_meters(avg_meters, criterion, prefix, batch_size):
+    diagnostics = get_fbdm_edge_diagnostics(criterion)
+    if diagnostics is None:
+        return
+    for name, value in diagnostics.items():
+        avg_meters[f"{prefix}_fbdm_{name}"].update(value, batch_size)
 
 
 def validate_sampling_args(args):
@@ -981,6 +1027,12 @@ def main(args):
         raise ValueError("fbdm_gate_init must be in (0, fbdm_gate_max).")
     if args.fbdm_edge_loss_weight < 0:
         raise ValueError("fbdm_edge_loss_weight must be non-negative.")
+    if args.fbdm_edge_pos_weight <= 0:
+        raise ValueError("fbdm_edge_pos_weight must be positive.")
+    if not 0.0 < args.fbdm_edge_focal_alpha < 1.0:
+        raise ValueError("fbdm_edge_focal_alpha must be in (0, 1).")
+    if args.fbdm_edge_focal_gamma < 0:
+        raise ValueError("fbdm_edge_focal_gamma must be non-negative.")
     if not 0.0 < args.fbdm_x2_edge_ratio <= 1.0:
         raise ValueError("fbdm_x2_edge_ratio must be in (0, 1].")
     if args.fbdm_edge_loss_final_weight is not None and args.fbdm_edge_loss_final_weight < 0:
@@ -1106,7 +1158,7 @@ def main(args):
                       'fusion_small_injection_deep_rms_ratio': AverageMeter(),
                       'fusion_large_injection_deep_rms_ratio': AverageMeter()}
         if args.model in FBDM_MODELS:
-            component_names = ["seg", "edge_weighted"]
+            component_names = ["seg", "edge_raw", "edge_weighted"]
             if args.model in HSPM_FBDM_MODELS:
                 component_names.insert(1, "coarse_weighted")
                 component_names.append("boundary_band_weighted")
@@ -1114,6 +1166,8 @@ def main(args):
             for prefix in ("train", "val"):
                 for component_name in component_names:
                     avg_meters[f"{prefix}_loss_{component_name}"] = AverageMeter()
+                for diagnostic_name in FBDM_EDGE_DIAGNOSTIC_NAMES:
+                    avg_meters[f"{prefix}_fbdm_{diagnostic_name}"] = AverageMeter()
             if args.model in HSPM_FBDM_V2_MODELS:
                 for diagnostic_name in FBDM_V2_DIAGNOSTIC_NAMES:
                     avg_meters[f"fbdm_v2_{diagnostic_name}"] = AverageMeter()
@@ -1148,6 +1202,13 @@ def main(args):
                 "train",
                 img_batch.size(0),
             )
+            if args.model in FBDM_MODELS:
+                update_fbdm_edge_diagnostic_meters(
+                    avg_meters,
+                    criterion,
+                    "train",
+                    img_batch.size(0),
+                )
             iou, dice, _, _, _, _, _ = iou_score(seg_logits, label_batch)
             optimizer.zero_grad()
             if loss.requires_grad:
@@ -1235,6 +1296,13 @@ def main(args):
                     "val",
                     img_batch.size(0),
                 )
+                if args.model in FBDM_MODELS:
+                    update_fbdm_edge_diagnostic_meters(
+                        avg_meters,
+                        criterion,
+                        "val",
+                        img_batch.size(0),
+                    )
                 avg_meters['val_loss'].update(loss.item(), img_batch.size(0))
                 if args.val_threshold_mode == "scan":
                     val_prob_batches.append(torch.sigmoid(seg_logits).detach().cpu())
@@ -1356,31 +1424,48 @@ def main(args):
             if args.model in HSPM_FBDM_MODELS:
                 logging.info(
                     "FBDM loss components: train(seg=%.6f - coarse=%.6f"
-                    " - edge=%.6f - band=%.6f - total=%.6f)"
-                    " - val(seg=%.6f - coarse=%.6f - edge=%.6f"
+                    " - edge_raw=%.6f - edge=%.6f - band=%.6f - total=%.6f)"
+                    " - val(seg=%.6f - coarse=%.6f - edge_raw=%.6f - edge=%.6f"
                     " - band=%.6f - total=%.6f)",
                     avg_meters["train_loss_seg"].avg,
                     avg_meters["train_loss_coarse_weighted"].avg,
+                    avg_meters["train_loss_edge_raw"].avg,
                     avg_meters["train_loss_edge_weighted"].avg,
                     avg_meters["train_loss_boundary_band_weighted"].avg,
                     avg_meters["train_loss_total"].avg,
                     avg_meters["val_loss_seg"].avg,
                     avg_meters["val_loss_coarse_weighted"].avg,
+                    avg_meters["val_loss_edge_raw"].avg,
                     avg_meters["val_loss_edge_weighted"].avg,
                     avg_meters["val_loss_boundary_band_weighted"].avg,
                     avg_meters["val_loss_total"].avg,
                 )
             else:
                 logging.info(
-                    "FBDM loss components: train(seg=%.6f - edge=%.6f"
-                    " - total=%.6f) - val(seg=%.6f - edge=%.6f - total=%.6f)",
+                    "FBDM loss components: train(seg=%.6f - edge_raw=%.6f - edge=%.6f"
+                    " - total=%.6f) - val(seg=%.6f - edge_raw=%.6f"
+                    " - edge=%.6f - total=%.6f)",
                     avg_meters["train_loss_seg"].avg,
+                    avg_meters["train_loss_edge_raw"].avg,
                     avg_meters["train_loss_edge_weighted"].avg,
                     avg_meters["train_loss_total"].avg,
                     avg_meters["val_loss_seg"].avg,
+                    avg_meters["val_loss_edge_raw"].avg,
                     avg_meters["val_loss_edge_weighted"].avg,
                     avg_meters["val_loss_total"].avg,
                 )
+            logging.info(
+                "FBDM edge diagnostics [%s]: train(target=%.6f - prob=%.6f"
+                " - positive@0.5=%.6f) - val(target=%.6f - prob=%.6f"
+                " - positive@0.5=%.6f)",
+                args.fbdm_edge_loss_type,
+                avg_meters["train_fbdm_edge_target_ratio"].avg,
+                avg_meters["train_fbdm_edge_prob_mean"].avg,
+                avg_meters["train_fbdm_edge_pred_positive_ratio"].avg,
+                avg_meters["val_fbdm_edge_target_ratio"].avg,
+                avg_meters["val_fbdm_edge_prob_mean"].avg,
+                avg_meters["val_fbdm_edge_pred_positive_ratio"].avg,
+            )
             if args.model in HSPM_FBDM_V2_MODELS:
                 logging.info(
                     "FBDM-v2 correction: schedule=%.4f - scale=%.6f"

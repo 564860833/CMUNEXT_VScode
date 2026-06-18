@@ -9,6 +9,7 @@ __all__ = [
     'SobelBoundaryLoss',
     'BoundaryAwareSegLoss',
     'HSPMLoss',
+    'EdgeSupervisionLoss',
     'FBDMLoss',
     'HSPMFBDMLoss',
     'mask_to_edge',
@@ -144,6 +145,104 @@ def mask_to_edge(mask, kernel_size=3):
     return (dilation - erosion).clamp(0.0, 1.0)
 
 
+class EdgeSupervisionLoss(nn.Module):
+    LOSS_TYPES = {"legacy", "balanced_bce_dice", "focal_dice"}
+
+    def __init__(
+        self,
+        loss_type="legacy",
+        pos_weight=20.0,
+        focal_alpha=0.95,
+        focal_gamma=2.0,
+        smooth=1e-5,
+    ):
+        super().__init__()
+        if loss_type not in self.LOSS_TYPES:
+            raise ValueError(
+                "loss_type must be one of: legacy, balanced_bce_dice, focal_dice."
+            )
+        if pos_weight <= 0:
+            raise ValueError("pos_weight must be positive.")
+        if not 0.0 < focal_alpha < 1.0:
+            raise ValueError("focal_alpha must be in (0, 1).")
+        if focal_gamma < 0:
+            raise ValueError("focal_gamma must be non-negative.")
+
+        self.loss_type = loss_type
+        self.focal_alpha = float(focal_alpha)
+        self.focal_gamma = float(focal_gamma)
+        self.smooth = float(smooth)
+        self.legacy_loss = BCEDiceLoss()
+        self.register_buffer("pos_weight", torch.tensor([float(pos_weight)]))
+
+    def _soft_dice_loss(self, logits, target):
+        probability = torch.sigmoid(logits)
+        batch_size = target.size(0)
+        probability = probability.reshape(batch_size, -1)
+        target = target.reshape(batch_size, -1)
+        intersection = (probability * target).sum(dim=1)
+        dice = (2.0 * intersection + self.smooth) / (
+            probability.sum(dim=1) + target.sum(dim=1) + self.smooth
+        )
+        return 1.0 - dice.mean()
+
+    def forward(self, logits, target):
+        target = target.to(device=logits.device, dtype=logits.dtype)
+        if self.loss_type == "legacy":
+            return self.legacy_loss(logits, target)
+
+        dice = self._soft_dice_loss(logits, target)
+        if self.loss_type == "balanced_bce_dice":
+            classification = F.binary_cross_entropy_with_logits(
+                logits,
+                target,
+                pos_weight=self.pos_weight.to(dtype=logits.dtype),
+            )
+        else:
+            elementwise_bce = F.binary_cross_entropy_with_logits(
+                logits,
+                target,
+                reduction="none",
+            )
+            probability = torch.sigmoid(logits)
+            p_t = target * probability + (1.0 - target) * (1.0 - probability)
+            alpha_t = (
+                target * self.focal_alpha
+                + (1.0 - target) * (1.0 - self.focal_alpha)
+            )
+            classification = (
+                alpha_t * (1.0 - p_t).pow(self.focal_gamma) * elementwise_bce
+            ).mean()
+        return 0.5 * classification + 0.5 * dice
+
+
+def _edge_target_at_size(target, size, kernel_size):
+    if target.shape[-2:] != size:
+        target = F.interpolate(target, size=size, mode="nearest")
+    return mask_to_edge(target, kernel_size=kernel_size)
+
+
+def _edge_diagnostics(logits, target):
+    with torch.no_grad():
+        probability = torch.sigmoid(logits.detach())
+        return {
+            "edge_target_ratio": target.detach().float().mean(),
+            "edge_prob_mean": probability.float().mean(),
+            "edge_pred_positive_ratio": (probability > 0.5).float().mean(),
+        }
+
+
+def _weighted_edge_diagnostics(weighted_diagnostics):
+    return {
+        name: sum(weight * diagnostics[name] for weight, diagnostics in weighted_diagnostics)
+        for name in (
+            "edge_target_ratio",
+            "edge_prob_mean",
+            "edge_pred_positive_ratio",
+        )
+    }
+
+
 class HSPMFBDMLoss(nn.Module):
     def __init__(
         self,
@@ -152,6 +251,10 @@ class HSPMFBDMLoss(nn.Module):
         edge_kernel_size=3,
         boundary_band_weight=0.0,
         boundary_band_kernel_size=7,
+        edge_loss_type="legacy",
+        edge_pos_weight=20.0,
+        edge_focal_alpha=0.95,
+        edge_focal_gamma=2.0,
     ):
         super().__init__()
         if coarse_weight < 0:
@@ -168,6 +271,16 @@ class HSPMFBDMLoss(nn.Module):
         self.boundary_band_weight = float(boundary_band_weight)
         self.boundary_band_kernel_size = int(boundary_band_kernel_size)
         self.seg_loss = BCEDiceLoss()
+        self.edge_loss = EdgeSupervisionLoss(
+            loss_type=edge_loss_type,
+            pos_weight=edge_pos_weight,
+            focal_alpha=edge_focal_alpha,
+            focal_gamma=edge_focal_gamma,
+        )
+        self.last_edge_diagnostics = None
+
+    def get_edge_diagnostics(self):
+        return self.last_edge_diagnostics
 
     def forward(
         self,
@@ -195,18 +308,24 @@ class HSPMFBDMLoss(nn.Module):
 
         seg = self.seg_loss(outputs["seg"], target)
         coarse_weighted = seg.new_zeros(())
+        edge_raw = seg.new_zeros(())
         edge_weighted = seg.new_zeros(())
         boundary_band_weighted = seg.new_zeros(())
+        self.last_edge_diagnostics = None
         if current_coarse_weight > 0:
             coarse_target = F.interpolate(target, size=outputs["coarse"].shape[-2:], mode="nearest")
             coarse_weighted = current_coarse_weight * self.seg_loss(outputs["coarse"], coarse_target)
         if current_edge_weight > 0:
             if "edge" not in outputs:
                 raise KeyError("HSPMFBDMLoss requires 'edge' output when edge_weight > 0.")
-            edge_target = mask_to_edge(target, kernel_size=self.edge_kernel_size)
-            if edge_target.shape[-2:] != outputs["edge"].shape[-2:]:
-                edge_target = F.interpolate(edge_target, size=outputs["edge"].shape[-2:], mode="nearest")
-            edge_weighted = current_edge_weight * self.seg_loss(outputs["edge"], edge_target)
+            edge_target = _edge_target_at_size(
+                target,
+                outputs["edge"].shape[-2:],
+                self.edge_kernel_size,
+            )
+            edge_raw = self.edge_loss(outputs["edge"], edge_target)
+            edge_weighted = current_edge_weight * edge_raw
+            self.last_edge_diagnostics = _edge_diagnostics(outputs["edge"], edge_target)
         if current_boundary_band_weight > 0:
             required_keys = {"base_seg", "logit_correction"}
             missing_keys = required_keys.difference(outputs)
@@ -242,6 +361,7 @@ class HSPMFBDMLoss(nn.Module):
         return total, {
             "seg": seg,
             "coarse_weighted": coarse_weighted,
+            "edge_raw": edge_raw,
             "edge_weighted": edge_weighted,
             "boundary_band_weighted": boundary_band_weighted,
             "total": total,
@@ -249,7 +369,16 @@ class HSPMFBDMLoss(nn.Module):
 
 
 class FBDMLoss(nn.Module):
-    def __init__(self, edge_weight=0.05, edge_kernel_size=3, x2_edge_ratio=0.3):
+    def __init__(
+        self,
+        edge_weight=0.05,
+        edge_kernel_size=3,
+        x2_edge_ratio=0.3,
+        edge_loss_type="legacy",
+        edge_pos_weight=20.0,
+        edge_focal_alpha=0.95,
+        edge_focal_gamma=2.0,
+    ):
         super().__init__()
         if edge_weight < 0:
             raise ValueError("edge_weight must be non-negative.")
@@ -259,11 +388,19 @@ class FBDMLoss(nn.Module):
         self.edge_kernel_size = int(edge_kernel_size)
         self.x2_edge_ratio = float(x2_edge_ratio)
         self.seg_loss = BCEDiceLoss()
+        self.edge_loss = EdgeSupervisionLoss(
+            loss_type=edge_loss_type,
+            pos_weight=edge_pos_weight,
+            focal_alpha=edge_focal_alpha,
+            focal_gamma=edge_focal_gamma,
+        )
+        self.last_edge_diagnostics = None
 
     def _edge_target(self, target, size):
-        if target.shape[-2:] != size:
-            target = F.interpolate(target, size=size, mode="nearest")
-        return mask_to_edge(target, kernel_size=self.edge_kernel_size)
+        return _edge_target_at_size(target, size, self.edge_kernel_size)
+
+    def get_edge_diagnostics(self):
+        return self.last_edge_diagnostics
 
     def forward(self, outputs, target, edge_weight=None, return_components=False):
         if not isinstance(outputs, dict):
@@ -276,26 +413,39 @@ class FBDMLoss(nn.Module):
             raise ValueError("edge_weight must be non-negative.")
 
         seg = self.seg_loss(outputs["seg"], target)
+        edge_raw = seg.new_zeros(())
         edge_weighted = seg.new_zeros(())
+        self.last_edge_diagnostics = None
         if current_edge_weight > 0:
             if "edge" not in outputs:
                 raise KeyError("FBDMLoss requires an 'edge' output key when edge_weight > 0.")
             edge_target = self._edge_target(target, outputs["edge"].shape[-2:])
-            primary_edge_loss = self.seg_loss(outputs["edge"], edge_target)
+            primary_edge_loss = self.edge_loss(outputs["edge"], edge_target)
+            primary_diagnostics = _edge_diagnostics(outputs["edge"], edge_target)
             if "edge_x2" in outputs:
                 x2_target = self._edge_target(target, outputs["edge_x2"].shape[-2:])
-                x2_edge_loss = self.seg_loss(outputs["edge_x2"], x2_target)
-                x1_weight = current_edge_weight / (1.0 + self.x2_edge_ratio)
-                x2_weight = x1_weight * self.x2_edge_ratio
-                edge_weighted = x1_weight * primary_edge_loss + x2_weight * x2_edge_loss
+                x2_edge_loss = self.edge_loss(outputs["edge_x2"], x2_target)
+                x2_diagnostics = _edge_diagnostics(outputs["edge_x2"], x2_target)
+                x1_ratio = 1.0 / (1.0 + self.x2_edge_ratio)
+                x2_ratio = self.x2_edge_ratio / (1.0 + self.x2_edge_ratio)
+                edge_raw = x1_ratio * primary_edge_loss + x2_ratio * x2_edge_loss
+                self.last_edge_diagnostics = _weighted_edge_diagnostics(
+                    (
+                        (x1_ratio, primary_diagnostics),
+                        (x2_ratio, x2_diagnostics),
+                    )
+                )
             else:
-                edge_weighted = current_edge_weight * primary_edge_loss
+                edge_raw = primary_edge_loss
+                self.last_edge_diagnostics = primary_diagnostics
+            edge_weighted = current_edge_weight * edge_raw
 
         total = seg + edge_weighted
         if not return_components:
             return total
         return total, {
             "seg": seg,
+            "edge_raw": edge_raw,
             "edge_weighted": edge_weighted,
             "total": total,
         }
