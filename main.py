@@ -44,6 +44,7 @@ from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
 from src.network.conv_based.CMUNeXt_HSPM_Best0616 import cmunext_hspm_best0616
 from src.network.conv_based.CMUNeXt_HSPM_FBDM import cmunext_hspm_fbdm, cmunext_hspm_fbdm_v2
 from src.network.conv_based.CMUNeXt_HSPM_FBDM_Best0616 import cmunext_hspm_fbdm_best0616
+from src.network.conv_based.CMUNeXt_HSPM_FBDM_0619 import cmunext_hspm_fbdm_0619
 from src.network.conv_based.CMUNeXt_BA_DualGAG import cmunext_ba_dualgag
 from src.network.conv_based.CMUNeXt_BA_DualGAG_SpeckleEnhance import cmunext_ba_dualgag_speckleenhance
 from src.network.conv_based.CMUNeXt_DualGAG import cmunext_dualgag
@@ -60,6 +61,7 @@ from src.network.hybrid_based.Mobile_U_ViT import mobileuvit, mobileuvit_l
 
 HSPM_FBDM_V2_MODELS = {"CMUNeXt_HSPM_FBDM_V2"}
 HSPM_FBDM_BEST0616_MODEL = "CMUNeXt_HSPM_FBDM_Best0616"
+HSPM_FBDM_0619_MODEL = "CMUNeXt_HSPM_FBDM_0619"
 HSPM_FBDM_CORRECTION_MODELS = {
     *HSPM_FBDM_V2_MODELS,
     HSPM_FBDM_BEST0616_MODEL,
@@ -67,6 +69,7 @@ HSPM_FBDM_CORRECTION_MODELS = {
 HSPM_FBDM_MODELS = {
     "CMUNeXt_HSPM_FBDM",
     HSPM_FBDM_BEST0616_MODEL,
+    HSPM_FBDM_0619_MODEL,
     *HSPM_FBDM_V2_MODELS,
 }
 FBDM_BEST0616_MODEL = "CMUNeXt_FBDM_Best0616"
@@ -242,7 +245,11 @@ def parse_gag_stages(value):
 
 
 def apply_best0616_presets(args):
-    if args.model in {FBDM_BEST0616_MODEL, HSPM_FBDM_BEST0616_MODEL}:
+    if args.model in {
+        FBDM_BEST0616_MODEL,
+        HSPM_FBDM_BEST0616_MODEL,
+        HSPM_FBDM_0619_MODEL,
+    }:
         args.fbdm_edge_aux_only = True
         args.fbdm_gate_init = 0.01
         args.fbdm_gate_max = 0.06
@@ -279,7 +286,7 @@ def apply_best0616_presets(args):
         args.hspm_coarse_loss_weight = 0.1
         args.hspm_coarse_loss_final_weight = 0.02
         args.hspm_coarse_loss_decay_epochs = 150
-    if args.model == HSPM_FBDM_BEST0616_MODEL:
+    if args.model in {HSPM_FBDM_BEST0616_MODEL, HSPM_FBDM_0619_MODEL}:
         args.hspm_mode = "full"
         args.hspm_backbone_mode = "dual_path"
         args.hspm_fusion_mode = "global"
@@ -293,12 +300,40 @@ def apply_best0616_presets(args):
         args.hspm_coarse_loss_weight = 0.1
         args.hspm_coarse_loss_final_weight = 0.02
         args.hspm_coarse_loss_decay_epochs = 150
+    if args.model == HSPM_FBDM_0619_MODEL:
+        args.base_dir = "./data/busi"
+        args.train_file_dir = "busi_train3.txt"
+        args.val_file_dir = "busi_val3.txt"
+        args.base_lr = 0.01
+        args.batch_size = 8
+        args.epoch = 300
+        args.img_size = 256
+        args.num_classes = 1
+        args.seed = 41
+        args.use_extra_aug = False
+        args.sampling_mode = "uniform"
+        args.val_threshold_mode = "fixed"
+        args.val_threshold = 0.5
+        args.val_threshold_metric = "iou"
+        args.early_stop_patience = 0
+        args.fbdm_stages = (0, 1)
+        args.fbdm_x2_edge_ratio = 0.3
+        args.fbdm_edge_loss_type = "balanced_bce_dice"
+        args.fbdm_edge_pos_weight = 20.0
+        args.fbdm_edge_kernel_size = 3
+        args.fbdm_boundary_band_loss_weight = 0.0
+        args.fbdm_boundary_band_loss_final_weight = None
+        args.fbdm_boundary_band_loss_decay_epochs = 0
+        args.fbdm_refine_loss_weight = 0.0
+        args.fbdm_preserve_loss_weight = 0.0
+        args.fbdm_lr_multiplier = 1.0
+        args.fbdm_correction_lr_multiplier = 1.0
     return args
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default="CMUNeXt",
-                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_FBDM", FBDM_BEST0616_MODEL, "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", HSPM_BEST0616_MODEL, "CMUNeXt_HSPM_FBDM", HSPM_FBDM_BEST0616_MODEL, "CMUNeXt_HSPM_FBDM_V2",
+                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_FBDM", FBDM_BEST0616_MODEL, "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", HSPM_BEST0616_MODEL, "CMUNeXt_HSPM_FBDM", HSPM_FBDM_BEST0616_MODEL, HSPM_FBDM_0619_MODEL, "CMUNeXt_HSPM_FBDM_V2",
                              "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
                              "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
                              "CMUNeXt_BA_DualGAG_SpeckleEnhance",
@@ -561,6 +596,8 @@ def get_model(args):
             fbdm_correction_scale_max=args.fbdm_correction_scale_max,
             fbdm_boundary_gate_floor=args.fbdm_boundary_gate_floor,
         ).cuda()
+    elif args.model == HSPM_FBDM_0619_MODEL:
+        model = cmunext_hspm_fbdm_0619(num_classes=args.num_classes).cuda()
     elif args.model == "CMUNeXt_HSPM_FBDM":
         model = cmunext_hspm_fbdm(
             num_classes=args.num_classes,
@@ -672,6 +709,7 @@ def get_criterion(args):
             edge_pos_weight=args.fbdm_edge_pos_weight,
             edge_focal_alpha=args.fbdm_edge_focal_alpha,
             edge_focal_gamma=args.fbdm_edge_focal_gamma,
+            x2_edge_ratio=args.fbdm_x2_edge_ratio,
             protected_refinement=args.model == HSPM_FBDM_BEST0616_MODEL,
             refine_weight=args.fbdm_refine_loss_weight,
             preserve_weight=args.fbdm_preserve_loss_weight,

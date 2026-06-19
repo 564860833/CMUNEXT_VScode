@@ -243,6 +243,43 @@ def _weighted_edge_diagnostics(weighted_diagnostics):
     }
 
 
+def _multiscale_edge_loss(
+    outputs,
+    target,
+    edge_loss,
+    edge_kernel_size,
+    x2_edge_ratio,
+):
+    primary_target = _edge_target_at_size(
+        target,
+        outputs["edge"].shape[-2:],
+        edge_kernel_size,
+    )
+    primary_loss = edge_loss(outputs["edge"], primary_target)
+    primary_diagnostics = _edge_diagnostics(outputs["edge"], primary_target)
+
+    if "edge_x2" not in outputs:
+        return primary_loss, primary_diagnostics
+
+    x2_target = _edge_target_at_size(
+        target,
+        outputs["edge_x2"].shape[-2:],
+        edge_kernel_size,
+    )
+    x2_loss = edge_loss(outputs["edge_x2"], x2_target)
+    x2_diagnostics = _edge_diagnostics(outputs["edge_x2"], x2_target)
+    x1_ratio = 1.0 / (1.0 + x2_edge_ratio)
+    normalized_x2_ratio = x2_edge_ratio / (1.0 + x2_edge_ratio)
+    combined_loss = x1_ratio * primary_loss + normalized_x2_ratio * x2_loss
+    diagnostics = _weighted_edge_diagnostics(
+        (
+            (x1_ratio, primary_diagnostics),
+            (normalized_x2_ratio, x2_diagnostics),
+        )
+    )
+    return combined_loss, diagnostics
+
+
 class HSPMFBDMLoss(nn.Module):
     def __init__(
         self,
@@ -255,6 +292,7 @@ class HSPMFBDMLoss(nn.Module):
         edge_pos_weight=20.0,
         edge_focal_alpha=0.95,
         edge_focal_gamma=2.0,
+        x2_edge_ratio=0.3,
         protected_refinement=False,
         refine_weight=0.0,
         preserve_weight=0.0,
@@ -264,6 +302,8 @@ class HSPMFBDMLoss(nn.Module):
             raise ValueError("coarse_weight must be non-negative.")
         if edge_weight < 0:
             raise ValueError("edge_weight must be non-negative.")
+        if not 0.0 < x2_edge_ratio <= 1.0:
+            raise ValueError("x2_edge_ratio must be in (0, 1].")
         if boundary_band_weight < 0:
             raise ValueError("boundary_band_weight must be non-negative.")
         if refine_weight < 0 or preserve_weight < 0:
@@ -273,6 +313,7 @@ class HSPMFBDMLoss(nn.Module):
         self.coarse_weight = float(coarse_weight)
         self.edge_weight = float(edge_weight)
         self.edge_kernel_size = int(edge_kernel_size)
+        self.x2_edge_ratio = float(x2_edge_ratio)
         self.boundary_band_weight = float(boundary_band_weight)
         self.boundary_band_kernel_size = int(boundary_band_kernel_size)
         self.protected_refinement = bool(protected_refinement)
@@ -352,14 +393,14 @@ class HSPMFBDMLoss(nn.Module):
         if current_edge_weight > 0:
             if "edge" not in outputs:
                 raise KeyError("HSPMFBDMLoss requires 'edge' output when edge_weight > 0.")
-            edge_target = _edge_target_at_size(
+            edge_raw, self.last_edge_diagnostics = _multiscale_edge_loss(
+                outputs,
                 target,
-                outputs["edge"].shape[-2:],
+                self.edge_loss,
                 self.edge_kernel_size,
+                self.x2_edge_ratio,
             )
-            edge_raw = self.edge_loss(outputs["edge"], edge_target)
             edge_weighted = current_edge_weight * edge_raw
-            self.last_edge_diagnostics = _edge_diagnostics(outputs["edge"], edge_target)
         if self.protected_refinement and current_refine_weight > 0:
             refined_logits = outputs["base_seg"].detach() + outputs["logit_correction"]
             refine_weighted = current_refine_weight * self.seg_loss(refined_logits, target)
@@ -474,25 +515,13 @@ class FBDMLoss(nn.Module):
         if current_edge_weight > 0:
             if "edge" not in outputs:
                 raise KeyError("FBDMLoss requires an 'edge' output key when edge_weight > 0.")
-            edge_target = self._edge_target(target, outputs["edge"].shape[-2:])
-            primary_edge_loss = self.edge_loss(outputs["edge"], edge_target)
-            primary_diagnostics = _edge_diagnostics(outputs["edge"], edge_target)
-            if "edge_x2" in outputs:
-                x2_target = self._edge_target(target, outputs["edge_x2"].shape[-2:])
-                x2_edge_loss = self.edge_loss(outputs["edge_x2"], x2_target)
-                x2_diagnostics = _edge_diagnostics(outputs["edge_x2"], x2_target)
-                x1_ratio = 1.0 / (1.0 + self.x2_edge_ratio)
-                x2_ratio = self.x2_edge_ratio / (1.0 + self.x2_edge_ratio)
-                edge_raw = x1_ratio * primary_edge_loss + x2_ratio * x2_edge_loss
-                self.last_edge_diagnostics = _weighted_edge_diagnostics(
-                    (
-                        (x1_ratio, primary_diagnostics),
-                        (x2_ratio, x2_diagnostics),
-                    )
-                )
-            else:
-                edge_raw = primary_edge_loss
-                self.last_edge_diagnostics = primary_diagnostics
+            edge_raw, self.last_edge_diagnostics = _multiscale_edge_loss(
+                outputs,
+                target,
+                self.edge_loss,
+                self.edge_kernel_size,
+                self.x2_edge_ratio,
+            )
             edge_weighted = current_edge_weight * edge_raw
 
         total = seg + edge_weighted
