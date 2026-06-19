@@ -60,6 +60,10 @@ from src.network.hybrid_based.Mobile_U_ViT import mobileuvit, mobileuvit_l
 
 HSPM_FBDM_V2_MODELS = {"CMUNeXt_HSPM_FBDM_V2"}
 HSPM_FBDM_BEST0616_MODEL = "CMUNeXt_HSPM_FBDM_Best0616"
+HSPM_FBDM_CORRECTION_MODELS = {
+    *HSPM_FBDM_V2_MODELS,
+    HSPM_FBDM_BEST0616_MODEL,
+}
 HSPM_FBDM_MODELS = {
     "CMUNeXt_HSPM_FBDM",
     HSPM_FBDM_BEST0616_MODEL,
@@ -242,13 +246,38 @@ def apply_best0616_presets(args):
         args.fbdm_edge_loss_weight = 0.03
         args.fbdm_edge_loss_final_weight = 0.003
         args.fbdm_edge_loss_decay_epochs = 150
-    if args.model in {HSPM_BEST0616_MODEL, HSPM_FBDM_BEST0616_MODEL}:
+    if args.model == HSPM_FBDM_BEST0616_MODEL:
+        args.fbdm_edge_loss_type = "balanced_bce_dice"
+        args.fbdm_correction_scale_init = 0.02
+        args.fbdm_correction_scale_max = 0.10
+        args.fbdm_correction_start_epoch = 40
+        args.fbdm_correction_warmup_epochs = 40
+        args.fbdm_refine_loss_weight = 0.5
+        args.fbdm_preserve_loss_weight = 1.0
+        args.fbdm_boundary_band_loss_weight = 0.02
+        args.fbdm_boundary_band_loss_final_weight = 0.005
+        args.fbdm_boundary_band_loss_decay_epochs = 150
+    if args.model == HSPM_BEST0616_MODEL:
         args.hspm_mode = "full"
         args.hspm_backbone_mode = "dual_path"
         args.hspm_fusion_mode = "global"
         args.hspm_mixer_mode = "legacy"
         args.hspm_gamma_init = 0.1
         args.hspm_gamma_max = 0.3
+        args.hspm_temperature = 0.1
+        args.hspm_prototype_dropout = 0.0
+        args.hspm_fusion_gate_init = 0.05
+        args.hspm_fusion_gate_max = 0.3
+        args.hspm_coarse_loss_weight = 0.1
+        args.hspm_coarse_loss_final_weight = 0.02
+        args.hspm_coarse_loss_decay_epochs = 150
+    if args.model == HSPM_FBDM_BEST0616_MODEL:
+        args.hspm_mode = "full"
+        args.hspm_backbone_mode = "dual_path"
+        args.hspm_fusion_mode = "global"
+        args.hspm_mixer_mode = "bounded"
+        args.hspm_gamma_init = 0.1
+        args.hspm_gamma_max = 0.35
         args.hspm_temperature = 0.1
         args.hspm_prototype_dropout = 0.0
         args.hspm_fusion_gate_init = 0.05
@@ -399,6 +428,12 @@ parser.add_argument('--fbdm_correction_scale_max', type=float, default=0.3,
                     help='Maximum effective bounded logit-correction scale for FBDM V2')
 parser.add_argument('--fbdm_correction_warmup_epochs', type=int, default=40,
                     help='Epochs used to linearly warm up FBDM V2 logit correction')
+parser.add_argument('--fbdm_correction_start_epoch', type=int, default=0,
+                    help='Epoch at which protected FBDM logit correction starts')
+parser.add_argument('--fbdm_refine_loss_weight', type=float, default=0.0,
+                    help='Maximum protected FBDM refinement loss weight')
+parser.add_argument('--fbdm_preserve_loss_weight', type=float, default=0.0,
+                    help='Non-boundary logit-preservation loss weight')
 parser.add_argument('--fbdm_boundary_band_loss_weight', type=float, default=0.0,
                     help='Boundary-band loss weight for FBDM V2 logit correction')
 parser.add_argument('--fbdm_boundary_band_loss_final_weight', type=float, default=None,
@@ -497,7 +532,20 @@ def get_model(args):
     elif args.model == HSPM_BEST0616_MODEL:
         model = cmunext_hspm_best0616(num_classes=args.num_classes).cuda()
     elif args.model == HSPM_FBDM_BEST0616_MODEL:
-        model = cmunext_hspm_fbdm_best0616(num_classes=args.num_classes).cuda()
+        model = cmunext_hspm_fbdm_best0616(
+            num_classes=args.num_classes,
+            hspm_gamma_init=args.hspm_gamma_init,
+            hspm_gamma_max=args.hspm_gamma_max,
+            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
+            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
+            fbdm_semantic_uncertainty_weight=args.fbdm_semantic_uncertainty_weight,
+            fbdm_semantic_coarse_weight=args.fbdm_semantic_coarse_weight,
+            fbdm_semantic_gate_base=args.fbdm_semantic_gate_base,
+            fbdm_gate_init=args.fbdm_gate_init,
+            fbdm_gate_max=args.fbdm_gate_max,
+            fbdm_correction_scale_init=args.fbdm_correction_scale_init,
+            fbdm_correction_scale_max=args.fbdm_correction_scale_max,
+        ).cuda()
     elif args.model == "CMUNeXt_HSPM_FBDM":
         model = cmunext_hspm_fbdm(
             num_classes=args.num_classes,
@@ -609,6 +657,9 @@ def get_criterion(args):
             edge_pos_weight=args.fbdm_edge_pos_weight,
             edge_focal_alpha=args.fbdm_edge_focal_alpha,
             edge_focal_gamma=args.fbdm_edge_focal_gamma,
+            protected_refinement=args.model == HSPM_FBDM_BEST0616_MODEL,
+            refine_weight=args.fbdm_refine_loss_weight,
+            preserve_weight=args.fbdm_preserve_loss_weight,
         ).cuda()
     if args.model in FBDM_ONLY_MODELS:
         return losses.__dict__['FBDMLoss'](
@@ -685,6 +736,8 @@ def compute_loss(
     aux_weight=None,
     edge_weight=None,
     band_weight=None,
+    refine_weight=None,
+    preserve_weight=None,
 ):
     if args.model in HSPM_FBDM_MODELS:
         return criterion(
@@ -693,6 +746,8 @@ def compute_loss(
             coarse_weight=aux_weight,
             edge_weight=edge_weight,
             boundary_band_weight=band_weight,
+            refine_weight=refine_weight,
+            preserve_weight=preserve_weight,
             return_components=True,
         )
     if args.model in FBDM_ONLY_MODELS:
@@ -738,12 +793,19 @@ def get_fbdm_residual_scale(args, epoch_num):
 
 
 def get_fbdm_correction_schedule_scale(args, epoch_num):
-    if args.model not in HSPM_FBDM_V2_MODELS:
+    if args.model not in HSPM_FBDM_CORRECTION_MODELS:
         return 1.0
+    start_epoch = (
+        int(args.fbdm_correction_start_epoch)
+        if args.model == HSPM_FBDM_BEST0616_MODEL
+        else 0
+    )
+    if epoch_num < start_epoch:
+        return 0.0
     warmup_epochs = int(args.fbdm_correction_warmup_epochs)
     if warmup_epochs <= 0:
         return 1.0
-    return min(max(float(epoch_num) / warmup_epochs, 0.0), 1.0)
+    return min(max(float(epoch_num - start_epoch) / warmup_epochs, 0.0), 1.0)
 
 
 def get_fbdm_boundary_band_weight(args, epoch_num):
@@ -790,7 +852,7 @@ def configure_fbdm_epoch(args, model, epoch_num):
         fbdm1 = getattr(fbdm_model, "fbdm1", None)
         if fbdm1 is not None:
             fbdm1.set_residual_scale(residual_scale)
-        if args.model in HSPM_FBDM_V2_MODELS:
+        if args.model in HSPM_FBDM_CORRECTION_MODELS:
             fbdm_model.set_fbdm_correction_schedule_scale(
                 get_fbdm_correction_schedule_scale(args, epoch_num)
             )
@@ -1041,8 +1103,10 @@ def main(args):
         raise ValueError("FBDM schedule epochs must be non-negative.")
     if not 0.0 < args.fbdm_correction_scale_init < args.fbdm_correction_scale_max:
         raise ValueError("FBDM V2 correction scale init must be in (0, correction scale max).")
-    if args.fbdm_correction_warmup_epochs < 0:
-        raise ValueError("FBDM V2 correction warmup epochs must be non-negative.")
+    if args.fbdm_correction_warmup_epochs < 0 or args.fbdm_correction_start_epoch < 0:
+        raise ValueError("FBDM correction schedule epochs must be non-negative.")
+    if args.fbdm_refine_loss_weight < 0 or args.fbdm_preserve_loss_weight < 0:
+        raise ValueError("FBDM refine and preserve loss weights must be non-negative.")
     if args.fbdm_edge_kernel_size <= 0 or args.fbdm_edge_kernel_size % 2 == 0:
         raise ValueError("fbdm_edge_kernel_size must be a positive odd integer.")
     if args.fbdm_boundary_band_loss_weight < 0:
@@ -1060,8 +1124,8 @@ def main(args):
         args.fbdm_boundary_band_loss_final_weight is not None
         and args.fbdm_boundary_band_loss_final_weight > 0
     )
-    if boundary_band_enabled and args.model not in HSPM_FBDM_V2_MODELS:
-        raise ValueError("FBDM boundary-band loss is only supported by CMUNeXt_HSPM_FBDM_V2.")
+    if boundary_band_enabled and args.model not in HSPM_FBDM_CORRECTION_MODELS:
+        raise ValueError("FBDM boundary-band loss requires a logit-correction model.")
     if args.early_stop_patience < 0 or args.early_stop_min_delta < 0:
         raise ValueError("Early stopping settings must be non-negative.")
 
@@ -1111,6 +1175,7 @@ def main(args):
     # <=== 修改 7: 将 print 替换为 logging.info
     logging.info("{} iterations per epoch".format(len(trainloader)))
     best_iou = 0
+    best_base_iou = 0
     early_stop_best_iou = float("-inf")
     early_stop_wait = 0
     iter_num = 0
@@ -1120,6 +1185,8 @@ def main(args):
     train_iou_history = []
     val_loss_history = []
     val_iou_history = []
+    train_base_iou_history = []
+    val_base_iou_history = []
     val_threshold_history = []
 
     max_iterations = len(trainloader) * max_epoch
@@ -1135,13 +1202,25 @@ def main(args):
         )
         current_fbdm_boundary_band_weight = (
             get_fbdm_boundary_band_weight(args, epoch_num)
-            if args.model in HSPM_FBDM_V2_MODELS
+            if args.model in HSPM_FBDM_CORRECTION_MODELS
             else 0.0
         )
         current_band_weight = current_fbdm_boundary_band_weight
+        current_correction_schedule = get_fbdm_correction_schedule_scale(args, epoch_num)
+        current_refine_weight = (
+            args.fbdm_refine_loss_weight * current_correction_schedule
+            if args.model == HSPM_FBDM_BEST0616_MODEL
+            else 0.0
+        )
+        current_preserve_weight = (
+            args.fbdm_preserve_loss_weight * current_correction_schedule
+            if args.model == HSPM_FBDM_BEST0616_MODEL
+            else 0.0
+        )
         model.train()
         avg_meters = {'loss': AverageMeter(),
                       'iou': AverageMeter(),
+                      'base_iou': AverageMeter(),
                       'val_loss': AverageMeter(),
                       'val_iou': AverageMeter(),
                       'val_SE': AverageMeter(),
@@ -1151,6 +1230,10 @@ def main(args):
                       'val_HD95': AverageMeter(),
                       'val_ASSD': AverageMeter(),
                       'val_ACC': AverageMeter(),
+                      'val_base_iou': AverageMeter(),
+                      'val_base_SE': AverageMeter(),
+                      'val_base_HD95': AverageMeter(),
+                      'val_base_ASSD': AverageMeter(),
                       'fusion_predicted_area': AverageMeter(),
                       'fusion_smallness': AverageMeter(),
                       'fusion_spatial_gate': AverageMeter(),
@@ -1162,13 +1245,14 @@ def main(args):
             if args.model in HSPM_FBDM_MODELS:
                 component_names.insert(1, "coarse_weighted")
                 component_names.append("boundary_band_weighted")
+                component_names.extend(["refine_weighted", "preserve_weighted"])
             component_names.append("total")
             for prefix in ("train", "val"):
                 for component_name in component_names:
                     avg_meters[f"{prefix}_loss_{component_name}"] = AverageMeter()
                 for diagnostic_name in FBDM_EDGE_DIAGNOSTIC_NAMES:
                     avg_meters[f"{prefix}_fbdm_{diagnostic_name}"] = AverageMeter()
-            if args.model in HSPM_FBDM_V2_MODELS:
+            if args.model in HSPM_FBDM_CORRECTION_MODELS:
                 for diagnostic_name in FBDM_V2_DIAGNOSTIC_NAMES:
                     avg_meters[f"fbdm_v2_{diagnostic_name}"] = AverageMeter()
         if args.model in USLGSF_V3_MODELS:
@@ -1194,6 +1278,8 @@ def main(args):
                 aux_weight=current_coarse_weight,
                 edge_weight=current_edge_weight,
                 band_weight=current_band_weight,
+                refine_weight=current_refine_weight,
+                preserve_weight=current_preserve_weight,
             )
             loss = get_loss_tensor(loss_output)
             update_loss_component_meters(
@@ -1210,6 +1296,12 @@ def main(args):
                     img_batch.size(0),
                 )
             iou, dice, _, _, _, _, _ = iou_score(seg_logits, label_batch)
+            if args.model == HSPM_FBDM_BEST0616_MODEL:
+                base_iou, _, _, _, _, _, _ = iou_score(
+                    outputs["base_seg"],
+                    label_batch,
+                )
+                avg_meters['base_iou'].update(base_iou, img_batch.size(0))
             optimizer.zero_grad()
             if loss.requires_grad:
                 loss.backward()
@@ -1230,6 +1322,7 @@ def main(args):
             val_bar = tqdm(valloader, desc=f"Epoch {epoch_num}/{max_epoch} [Val  ]")
             selected_threshold = args.val_threshold
             val_prob_batches = []
+            val_base_prob_batches = []
             val_target_batches = []
             val_sample_count = 0
 
@@ -1238,6 +1331,11 @@ def main(args):
                 img_batch, label_batch = img_batch.cuda(), label_batch.cuda()
                 output = forward_with_model(args, model, img_batch)
                 seg_logits = get_seg_logits(output)
+                base_seg_logits = (
+                    output["base_seg"]
+                    if args.model == HSPM_FBDM_BEST0616_MODEL
+                    else None
+                )
                 if args.model in USLGSF_V3_MODELS:
                     uslgsf_diagnostics = get_uslgsf_diagnostics(model)
                     if uslgsf_diagnostics is not None:
@@ -1271,7 +1369,7 @@ def main(args):
                                 ratio_sum / count,
                                 count,
                             )
-                if args.model in HSPM_FBDM_V2_MODELS:
+                if args.model in HSPM_FBDM_CORRECTION_MODELS:
                     fbdm_v2_diagnostics = get_fbdm_v2_diagnostics(model)
                     if fbdm_v2_diagnostics is not None:
                         for diagnostic_name, diagnostic_value in fbdm_v2_diagnostics.items():
@@ -1288,6 +1386,8 @@ def main(args):
                     aux_weight=current_coarse_weight,
                     edge_weight=current_edge_weight,
                     band_weight=current_band_weight,
+                    refine_weight=current_refine_weight,
+                    preserve_weight=current_preserve_weight,
                 )
                 loss = get_loss_tensor(loss_output)
                 update_loss_component_meters(
@@ -1306,6 +1406,10 @@ def main(args):
                 avg_meters['val_loss'].update(loss.item(), img_batch.size(0))
                 if args.val_threshold_mode == "scan":
                     val_prob_batches.append(torch.sigmoid(seg_logits).detach().cpu())
+                    if base_seg_logits is not None:
+                        val_base_prob_batches.append(
+                            torch.sigmoid(base_seg_logits).detach().cpu()
+                        )
                     val_target_batches.append(label_batch.detach().cpu())
                     val_sample_count += img_batch.size(0)
                     val_bar.set_postfix(val_loss=avg_meters['val_loss'].avg)
@@ -1329,6 +1433,21 @@ def main(args):
                 avg_meters['val_HD95'].update(hd95, img_batch.size(0))
                 avg_meters['val_ASSD'].update(assd, img_batch.size(0))
                 avg_meters['val_ACC'].update(ACC, img_batch.size(0))
+                if base_seg_logits is not None:
+                    base_iou, _, base_SE, _, _, _, _ = iou_score(
+                        base_seg_logits,
+                        label_batch,
+                        threshold=args.val_threshold,
+                    )
+                    base_hd95, base_assd = boundary_scores(
+                        base_seg_logits,
+                        label_batch,
+                        threshold=args.val_threshold,
+                    )
+                    avg_meters['val_base_iou'].update(base_iou, img_batch.size(0))
+                    avg_meters['val_base_SE'].update(base_SE, img_batch.size(0))
+                    avg_meters['val_base_HD95'].update(base_hd95, img_batch.size(0))
+                    avg_meters['val_base_ASSD'].update(base_assd, img_batch.size(0))
                 val_bar.set_postfix(val_loss=avg_meters['val_loss'].avg, val_iou=avg_meters['val_iou'].avg)
 
             if args.val_threshold_mode == "scan":
@@ -1348,6 +1467,18 @@ def main(args):
                 avg_meters['val_HD95'].update(val_metrics['hd95'], val_sample_count)
                 avg_meters['val_ASSD'].update(val_metrics['assd'], val_sample_count)
                 avg_meters['val_ACC'].update(val_metrics['acc'], val_sample_count)
+                if val_base_prob_batches:
+                    base_metrics = find_best_threshold(
+                        val_base_prob_batches,
+                        val_target_batches,
+                        [selected_threshold],
+                        select_metric=args.val_threshold_metric,
+                        from_logits=False,
+                    )
+                    avg_meters['val_base_iou'].update(base_metrics['iou'], val_sample_count)
+                    avg_meters['val_base_SE'].update(base_metrics['se'], val_sample_count)
+                    avg_meters['val_base_HD95'].update(base_metrics['hd95'], val_sample_count)
+                    avg_meters['val_base_ASSD'].update(base_metrics['assd'], val_sample_count)
 
         # <=== 修改 8: 将 print 替换为 logging.info
         if isinstance(trainloader.sampler, TrackingWeightedRandomSampler):
@@ -1424,20 +1555,25 @@ def main(args):
             if args.model in HSPM_FBDM_MODELS:
                 logging.info(
                     "FBDM loss components: train(seg=%.6f - coarse=%.6f"
-                    " - edge_raw=%.6f - edge=%.6f - band=%.6f - total=%.6f)"
+                    " - edge_raw=%.6f - edge=%.6f - band=%.6f - refine=%.6f"
+                    " - preserve=%.6f - total=%.6f)"
                     " - val(seg=%.6f - coarse=%.6f - edge_raw=%.6f - edge=%.6f"
-                    " - band=%.6f - total=%.6f)",
+                    " - band=%.6f - refine=%.6f - preserve=%.6f - total=%.6f)",
                     avg_meters["train_loss_seg"].avg,
                     avg_meters["train_loss_coarse_weighted"].avg,
                     avg_meters["train_loss_edge_raw"].avg,
                     avg_meters["train_loss_edge_weighted"].avg,
                     avg_meters["train_loss_boundary_band_weighted"].avg,
+                    avg_meters["train_loss_refine_weighted"].avg,
+                    avg_meters["train_loss_preserve_weighted"].avg,
                     avg_meters["train_loss_total"].avg,
                     avg_meters["val_loss_seg"].avg,
                     avg_meters["val_loss_coarse_weighted"].avg,
                     avg_meters["val_loss_edge_raw"].avg,
                     avg_meters["val_loss_edge_weighted"].avg,
                     avg_meters["val_loss_boundary_band_weighted"].avg,
+                    avg_meters["val_loss_refine_weighted"].avg,
+                    avg_meters["val_loss_preserve_weighted"].avg,
                     avg_meters["val_loss_total"].avg,
                 )
             else:
@@ -1466,7 +1602,7 @@ def main(args):
                 avg_meters["val_fbdm_edge_prob_mean"].avg,
                 avg_meters["val_fbdm_edge_pred_positive_ratio"].avg,
             )
-            if args.model in HSPM_FBDM_V2_MODELS:
+            if args.model in HSPM_FBDM_CORRECTION_MODELS:
                 logging.info(
                     "FBDM-v2 correction: schedule=%.4f - scale=%.6f"
                     " - boundary_gate_mean=%.6f - boundary_gate>0.5=%.6f"
@@ -1479,6 +1615,20 @@ def main(args):
                     avg_meters["fbdm_v2_logit_correction_abs_mean"].avg,
                     avg_meters["fbdm_v2_logit_correction_abs_max"].avg,
                     avg_meters["fbdm_v2_prediction_flip_ratio"].avg,
+                )
+            if args.model == HSPM_FBDM_BEST0616_MODEL:
+                logging.info(
+                    "Protected HSPM-FBDM metrics: refine_weight=%.4f"
+                    " - preserve_weight=%.4f - train_base_iou=%.4f"
+                    " - val_base_iou=%.4f - val_base_SE=%.4f"
+                    " - val_base_HD95=%.4f - val_base_ASSD=%.4f",
+                    current_refine_weight,
+                    current_preserve_weight,
+                    avg_meters["base_iou"].avg,
+                    avg_meters["val_base_iou"].avg,
+                    avg_meters["val_base_SE"].avg,
+                    avg_meters["val_base_HD95"].avg,
+                    avg_meters["val_base_ASSD"].avg,
                 )
         if args.model in USLGSF_V3_MODELS:
             for stage in args.uslgsf_stages:
@@ -1524,6 +1674,9 @@ def main(args):
         train_iou_history.append(avg_meters['iou'].avg)
         val_loss_history.append(avg_meters['val_loss'].avg)
         val_iou_history.append(avg_meters['val_iou'].avg)
+        if args.model == HSPM_FBDM_BEST0616_MODEL:
+            train_base_iou_history.append(avg_meters['base_iou'].avg)
+            val_base_iou_history.append(avg_meters['val_base_iou'].avg)
         if args.val_threshold_mode == "scan":
             val_threshold_history.append(selected_threshold)
 
@@ -1542,6 +1695,22 @@ def main(args):
                 logging.info(f"=> saved best model to {save_file_path} (threshold={selected_threshold:.4f})")
             else:
                 logging.info(f"=> saved best model to {save_file_path}")
+
+        if (
+            args.model == HSPM_FBDM_BEST0616_MODEL
+            and avg_meters['val_base_iou'].avg > best_base_iou
+        ):
+            base_save_path = os.path.join(
+                args.save_dir,
+                '{}_model_base_best.pth'.format(args.model),
+            )
+            torch.save(model.state_dict(), base_save_path)
+            best_base_iou = avg_meters['val_base_iou'].avg
+            logging.info(
+                "=> saved best protected HSPM base model to %s (base_iou=%.4f)",
+                base_save_path,
+                best_base_iou,
+            )
 
         if args.early_stop_patience > 0:
             current_iou = avg_meters['val_iou'].avg
@@ -1567,6 +1736,15 @@ def main(args):
     np.save(os.path.join(args.save_dir, f'{args.model}_train_iou.npy'), np.array(train_iou_history))
     np.save(os.path.join(args.save_dir, f'{args.model}_val_loss.npy'), np.array(val_loss_history))
     np.save(os.path.join(args.save_dir, f'{args.model}_val_iou.npy'), np.array(val_iou_history))
+    if args.model == HSPM_FBDM_BEST0616_MODEL:
+        np.save(
+            os.path.join(args.save_dir, f'{args.model}_train_base_iou.npy'),
+            np.array(train_base_iou_history),
+        )
+        np.save(
+            os.path.join(args.save_dir, f'{args.model}_val_base_iou.npy'),
+            np.array(val_base_iou_history),
+        )
     if args.val_threshold_mode == "scan":
         np.save(os.path.join(args.save_dir, f'{args.model}_val_threshold.npy'), np.array(val_threshold_history))
 

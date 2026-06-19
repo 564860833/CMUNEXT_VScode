@@ -255,6 +255,9 @@ class HSPMFBDMLoss(nn.Module):
         edge_pos_weight=20.0,
         edge_focal_alpha=0.95,
         edge_focal_gamma=2.0,
+        protected_refinement=False,
+        refine_weight=0.0,
+        preserve_weight=0.0,
     ):
         super().__init__()
         if coarse_weight < 0:
@@ -263,6 +266,8 @@ class HSPMFBDMLoss(nn.Module):
             raise ValueError("edge_weight must be non-negative.")
         if boundary_band_weight < 0:
             raise ValueError("boundary_band_weight must be non-negative.")
+        if refine_weight < 0 or preserve_weight < 0:
+            raise ValueError("refine_weight and preserve_weight must be non-negative.")
         if boundary_band_kernel_size <= 0 or boundary_band_kernel_size % 2 == 0:
             raise ValueError("boundary_band_kernel_size must be a positive odd integer.")
         self.coarse_weight = float(coarse_weight)
@@ -270,6 +275,9 @@ class HSPMFBDMLoss(nn.Module):
         self.edge_kernel_size = int(edge_kernel_size)
         self.boundary_band_weight = float(boundary_band_weight)
         self.boundary_band_kernel_size = int(boundary_band_kernel_size)
+        self.protected_refinement = bool(protected_refinement)
+        self.refine_weight = float(refine_weight)
+        self.preserve_weight = float(preserve_weight)
         self.seg_loss = BCEDiceLoss()
         self.edge_loss = EdgeSupervisionLoss(
             loss_type=edge_loss_type,
@@ -289,6 +297,8 @@ class HSPMFBDMLoss(nn.Module):
         coarse_weight=None,
         edge_weight=None,
         boundary_band_weight=None,
+        refine_weight=None,
+        preserve_weight=None,
         return_components=False,
     ):
         if not isinstance(outputs, dict):
@@ -303,14 +313,38 @@ class HSPMFBDMLoss(nn.Module):
             if boundary_band_weight is None
             else float(boundary_band_weight)
         )
-        if min(current_coarse_weight, current_edge_weight, current_boundary_band_weight) < 0:
+        current_refine_weight = (
+            self.refine_weight if refine_weight is None else float(refine_weight)
+        )
+        current_preserve_weight = (
+            self.preserve_weight if preserve_weight is None else float(preserve_weight)
+        )
+        if min(
+            current_coarse_weight,
+            current_edge_weight,
+            current_boundary_band_weight,
+            current_refine_weight,
+            current_preserve_weight,
+        ) < 0:
             raise ValueError("dynamic HSPM-FBDM loss weights must be non-negative.")
 
-        seg = self.seg_loss(outputs["seg"], target)
+        if self.protected_refinement:
+            required_keys = {"base_seg", "logit_correction", "boundary_gate"}
+            missing_keys = required_keys.difference(outputs)
+            if missing_keys:
+                raise KeyError(
+                    "Protected HSPM-FBDM refinement requires output keys: "
+                    f"{sorted(required_keys)}."
+                )
+            seg = self.seg_loss(outputs["base_seg"], target)
+        else:
+            seg = self.seg_loss(outputs["seg"], target)
         coarse_weighted = seg.new_zeros(())
         edge_raw = seg.new_zeros(())
         edge_weighted = seg.new_zeros(())
         boundary_band_weighted = seg.new_zeros(())
+        refine_weighted = seg.new_zeros(())
+        preserve_weighted = seg.new_zeros(())
         self.last_edge_diagnostics = None
         if current_coarse_weight > 0:
             coarse_target = F.interpolate(target, size=outputs["coarse"].shape[-2:], mode="nearest")
@@ -326,6 +360,18 @@ class HSPMFBDMLoss(nn.Module):
             edge_raw = self.edge_loss(outputs["edge"], edge_target)
             edge_weighted = current_edge_weight * edge_raw
             self.last_edge_diagnostics = _edge_diagnostics(outputs["edge"], edge_target)
+        if self.protected_refinement and current_refine_weight > 0:
+            refined_logits = outputs["base_seg"].detach() + outputs["logit_correction"]
+            refine_weighted = current_refine_weight * self.seg_loss(refined_logits, target)
+        if self.protected_refinement and current_preserve_weight > 0:
+            boundary_gate = outputs["boundary_gate"].detach().to(
+                device=outputs["logit_correction"].device,
+                dtype=outputs["logit_correction"].dtype,
+            )
+            preserve = (
+                (1.0 - boundary_gate) * outputs["logit_correction"].square()
+            ).mean()
+            preserve_weighted = current_preserve_weight * preserve
         if current_boundary_band_weight > 0:
             required_keys = {"base_seg", "logit_correction"}
             missing_keys = required_keys.difference(outputs)
@@ -355,7 +401,14 @@ class HSPMFBDMLoss(nn.Module):
             band_loss = (band * band_elementwise).sum() / band.sum().clamp_min(1.0)
             boundary_band_weighted = current_boundary_band_weight * band_loss
 
-        total = seg + coarse_weighted + edge_weighted + boundary_band_weighted
+        total = (
+            seg
+            + coarse_weighted
+            + edge_weighted
+            + boundary_band_weighted
+            + refine_weighted
+            + preserve_weighted
+        )
         if not return_components:
             return total
         return total, {
@@ -364,6 +417,8 @@ class HSPMFBDMLoss(nn.Module):
             "edge_raw": edge_raw,
             "edge_weighted": edge_weighted,
             "boundary_band_weighted": boundary_band_weighted,
+            "refine_weighted": refine_weighted,
+            "preserve_weighted": preserve_weighted,
             "total": total,
         }
 

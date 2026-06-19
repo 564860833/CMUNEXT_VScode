@@ -26,6 +26,18 @@ SMALL_KERNELS = (3, 3, 3, 3, 3)
 
 
 class Best0616ModelTests(unittest.TestCase):
+    def test_inference_can_select_protected_base_logits(self):
+        outputs = {
+            "seg": torch.ones(1, 1, 4, 4),
+            "base_seg": torch.zeros(1, 1, 4, 4),
+        }
+        self.assertTrue(
+            torch.equal(
+                inference_main.get_seg_logits(outputs, use_base_seg=True),
+                outputs["base_seg"],
+            )
+        )
+
     def test_fbdm_stage_parser_accepts_supported_combinations(self):
         for parser_fn in (training_main.parse_fbdm_stages, inference_main.parse_fbdm_stages):
             self.assertEqual(parser_fn("0"), (0,))
@@ -283,18 +295,36 @@ class Best0616ModelTests(unittest.TestCase):
         with torch.no_grad():
             outputs = model(torch.randn(2, 3, 32, 32))
 
-        self.assertEqual(set(outputs), {"seg", "coarse", "uncertainty", "edge"})
+        self.assertEqual(
+            set(outputs),
+            {
+                "seg",
+                "base_seg",
+                "coarse",
+                "uncertainty",
+                "edge",
+                "boundary_gate",
+                "logit_correction",
+            },
+        )
         self.assertEqual(outputs["seg"].shape, (2, 1, 32, 32))
+        self.assertTrue(torch.equal(outputs["seg"], outputs["base_seg"]))
+        self.assertTrue(
+            torch.equal(outputs["logit_correction"], torch.zeros_like(outputs["seg"]))
+        )
         self.assertEqual(outputs["coarse"].shape, (2, 1, 4, 4))
         self.assertEqual(outputs["edge"].shape, (2, 1, 32, 32))
         self.assertEqual(model.hspm_backbone_mode, "dual_path")
         self.assertEqual(model.hspm_fusion_mode, "global")
-        self.assertEqual(model.prototype_mixer.mixer_mode, "legacy")
+        self.assertEqual(model.prototype_mixer.mixer_mode, "bounded")
+        self.assertEqual(model.prototype_mixer.gamma_max, 0.35)
         self.assertAlmostEqual(model.effective_fusion_gate().item(), 0.05, places=5)
         self.assertTrue(model.fbdm1.edge_aux_only)
-        self.assertFalse(model.fbdm1.use_hspm_prior)
+        self.assertTrue(model.fbdm1.use_hspm_prior)
+        self.assertTrue(model.fbdm1.detach_hspm_prior)
         self.assertAlmostEqual(model.fbdm1.effective_gamma().item(), 0.01, places=5)
         self.assertEqual(model.fbdm1.gate_max, 0.06)
+        self.assertEqual(model.fbdm_correction.correction_scale_max, 0.10)
         self.assertIsNotNone(model.last_fusion_diagnostics)
 
     def test_hspm_fbdm_best0616_loss_backward(self):
@@ -310,10 +340,15 @@ class Best0616ModelTests(unittest.TestCase):
         total, components = HSPMFBDMLoss(
             coarse_weight=0.1,
             edge_weight=0.03,
+            protected_refinement=True,
+            refine_weight=0.5,
+            preserve_weight=1.0,
         )(outputs, target, return_components=True)
 
         self.assertTrue(torch.isfinite(total))
         self.assertIn("edge_weighted", components)
+        self.assertIn("refine_weighted", components)
+        self.assertIn("preserve_weighted", components)
         total.backward()
         self.assertIsNotNone(model.Conv_1x1.weight.grad)
         self.assertIsNotNone(model.fbdm1.edge_head.weight.grad)
@@ -352,10 +387,17 @@ class Best0616ModelTests(unittest.TestCase):
         self.assertEqual(hspm_fbdm_args.fbdm_edge_loss_decay_epochs, 150)
         self.assertEqual(hspm_fbdm_args.hspm_backbone_mode, "dual_path")
         self.assertEqual(hspm_fbdm_args.hspm_fusion_mode, "global")
-        self.assertEqual(hspm_fbdm_args.hspm_mixer_mode, "legacy")
+        self.assertEqual(hspm_fbdm_args.hspm_mixer_mode, "bounded")
+        self.assertEqual(hspm_fbdm_args.hspm_gamma_max, 0.35)
         self.assertEqual(hspm_fbdm_args.hspm_coarse_loss_weight, 0.1)
         self.assertEqual(hspm_fbdm_args.hspm_coarse_loss_final_weight, 0.02)
         self.assertEqual(hspm_fbdm_args.hspm_coarse_loss_decay_epochs, 150)
+        self.assertEqual(hspm_fbdm_args.fbdm_edge_loss_type, "balanced_bce_dice")
+        self.assertEqual(hspm_fbdm_args.fbdm_correction_scale_init, 0.02)
+        self.assertEqual(hspm_fbdm_args.fbdm_correction_scale_max, 0.10)
+        self.assertEqual(hspm_fbdm_args.fbdm_correction_start_epoch, 40)
+        self.assertEqual(hspm_fbdm_args.fbdm_refine_loss_weight, 0.5)
+        self.assertEqual(hspm_fbdm_args.fbdm_preserve_loss_weight, 1.0)
 
     def test_edge_loss_cli_defaults_and_best0616_presets_are_compatible(self):
         self.assertEqual(training_main.args.fbdm_edge_loss_type, "legacy")
@@ -400,7 +442,6 @@ class Best0616ModelTests(unittest.TestCase):
         for path in (
             Path("src/network/conv_based/CMUNeXt_FBDM_Best0616.py"),
             Path("src/network/conv_based/CMUNeXt_HSPM_Best0616.py"),
-            Path("src/network/conv_based/CMUNeXt_HSPM_FBDM_Best0616.py"),
         ):
             source = path.read_text(encoding="utf-8")
             self.assertNotIn("from src.network", source)
@@ -441,17 +482,14 @@ class Best0616ModelTests(unittest.TestCase):
         best.load_state_dict(original.state_dict(), strict=True)
 
     def test_hspm_fbdm_best0616_state_dict_matches_original_best_structure(self):
-        original = cmunext_hspm_fbdm(
+        original = cmunext_hspm(
             dims=SMALL_DIMS,
             depths=SMALL_DEPTHS,
             kernels=SMALL_KERNELS,
             hspm_backbone_mode="dual_path",
             hspm_fusion_mode="global",
-            hspm_mixer_mode="legacy",
-            fbdm_use_hspm_prior=False,
-            fbdm_gate_init=0.01,
-            fbdm_gate_max=0.06,
-            fbdm_edge_aux_only=True,
+            hspm_mixer_mode="bounded",
+            hspm_gamma_max=0.35,
         )
         best = cmunext_hspm_fbdm_best0616(
             dims=SMALL_DIMS,
@@ -459,7 +497,15 @@ class Best0616ModelTests(unittest.TestCase):
             kernels=SMALL_KERNELS,
         )
 
-        best.load_state_dict(original.state_dict(), strict=True)
+        incompatible = best.load_state_dict(original.state_dict(), strict=False)
+        self.assertEqual(incompatible.unexpected_keys, [])
+        self.assertTrue(incompatible.missing_keys)
+        self.assertTrue(
+            all(
+                key.startswith(("fbdm1.", "fbdm_correction."))
+                for key in incompatible.missing_keys
+            )
+        )
 
 
 if __name__ == "__main__":

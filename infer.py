@@ -39,6 +39,10 @@ from src.network.transfomer_based.transformer_based_network import get_transform
 
 HSPM_FBDM_V2_MODELS = {"CMUNeXt_HSPM_FBDM_V2"}
 HSPM_FBDM_BEST0616_MODEL = "CMUNeXt_HSPM_FBDM_Best0616"
+HSPM_FBDM_CORRECTION_MODELS = {
+    *HSPM_FBDM_V2_MODELS,
+    HSPM_FBDM_BEST0616_MODEL,
+}
 HSPM_FBDM_MODELS = {
     "CMUNeXt_HSPM_FBDM",
     HSPM_FBDM_BEST0616_MODEL,
@@ -182,7 +186,7 @@ def apply_best0616_presets(args):
         args.fbdm_edge_loss_final_weight = 0.003
         args.fbdm_edge_loss_decay_epochs = 150
         args.fbdm_residual_warmup_epochs = 40
-    if args.model in {HSPM_BEST0616_MODEL, HSPM_FBDM_BEST0616_MODEL}:
+    if args.model == HSPM_BEST0616_MODEL:
         args.hspm_mode = "full"
         args.hspm_backbone_mode = "dual_path"
         args.hspm_fusion_mode = "global"
@@ -196,6 +200,23 @@ def apply_best0616_presets(args):
         args.hspm_coarse_loss_weight = 0.1
         args.hspm_coarse_loss_final_weight = 0.02
         args.hspm_coarse_loss_decay_epochs = 150
+    if args.model == HSPM_FBDM_BEST0616_MODEL:
+        args.hspm_mode = "full"
+        args.hspm_backbone_mode = "dual_path"
+        args.hspm_fusion_mode = "global"
+        args.hspm_mixer_mode = "bounded"
+        args.hspm_gamma_init = 0.1
+        args.hspm_gamma_max = 0.35
+        args.hspm_temperature = 0.1
+        args.hspm_prototype_dropout = 0.0
+        args.hspm_fusion_gate_init = 0.05
+        args.hspm_fusion_gate_max = 0.3
+        args.hspm_coarse_loss_weight = 0.1
+        args.hspm_coarse_loss_final_weight = 0.02
+        args.hspm_coarse_loss_decay_epochs = 150
+        args.fbdm_edge_loss_type = "balanced_bce_dice"
+        args.fbdm_correction_scale_init = 0.02
+        args.fbdm_correction_scale_max = 0.10
     return args
 
 
@@ -268,7 +289,20 @@ def build_model(args, parser):
     elif args.model == HSPM_BEST0616_MODEL:
         model = cmunext_hspm_best0616(num_classes=args.num_classes)
     elif args.model == HSPM_FBDM_BEST0616_MODEL:
-        model = cmunext_hspm_fbdm_best0616(num_classes=args.num_classes)
+        model = cmunext_hspm_fbdm_best0616(
+            num_classes=args.num_classes,
+            hspm_gamma_init=args.hspm_gamma_init,
+            hspm_gamma_max=args.hspm_gamma_max,
+            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
+            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
+            fbdm_semantic_uncertainty_weight=args.fbdm_semantic_uncertainty_weight,
+            fbdm_semantic_coarse_weight=args.fbdm_semantic_coarse_weight,
+            fbdm_semantic_gate_base=args.fbdm_semantic_gate_base,
+            fbdm_gate_init=args.fbdm_gate_init,
+            fbdm_gate_max=args.fbdm_gate_max,
+            fbdm_correction_scale_init=args.fbdm_correction_scale_init,
+            fbdm_correction_scale_max=args.fbdm_correction_scale_max,
+        )
     elif args.model == "CMUNeXt_HSPM_FBDM":
         model = cmunext_hspm_fbdm(
             num_classes=args.num_classes,
@@ -393,8 +427,12 @@ def forward_with_model(model, model_name, x):
     return model(x)
 
 
-def get_seg_logits(outputs):
+def get_seg_logits(outputs, use_base_seg=False):
     if isinstance(outputs, dict):
+        if use_base_seg:
+            if "base_seg" not in outputs:
+                raise KeyError("Requested base segmentation, but model output has no 'base_seg'.")
+            return outputs["base_seg"]
         if "seg" in outputs:
             return outputs["seg"]
         if "pred_refined" in outputs:
@@ -625,9 +663,14 @@ def validate(model, val_loader, criterion, device, args, save_dir="validation_re
             img_batch, label_batch = sampled_batch["image"], sampled_batch["label"]
             img_batch, label_batch = img_batch.to(device), label_batch.to(device)
             outputs = forward_with_model(model, args.model, img_batch)
-            seg_logits = get_seg_logits(outputs)
+            use_base_seg = getattr(args, "use_base_seg", False)
+            seg_logits = get_seg_logits(outputs, use_base_seg=use_base_seg)
             if args.model in HSPM_MODELS:
-                loss = criterion(outputs, label_batch)
+                loss_outputs = outputs
+                if use_base_seg and isinstance(outputs, dict):
+                    loss_outputs = dict(outputs)
+                    loss_outputs["seg"] = seg_logits
+                loss = criterion(loss_outputs, label_batch)
             elif args.model in FBDM_ONLY_MODELS:
                 loss = criterion(outputs, label_batch)
             else:
@@ -730,6 +773,8 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="U_Net", choices=model_choices, help="model type")
     parser.add_argument("--model_path", type=str, default="./checkpoint/U_Net_model.pth",
                         help="Path to the trained model")
+    parser.add_argument("--use_base_seg", action="store_true",
+                        help="Evaluate protected HSPM base logits instead of FBDM-corrected logits")
     parser.add_argument("--base_dir", type=str, default="./data/test", help="base directory of dataset")
     parser.add_argument("--train_file_dir", type=str, default="train.txt",
                         help="(Required by MedicalDataSets) train file directory")
@@ -870,6 +915,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     apply_best0616_presets(args)
 
+    if args.use_base_seg and args.model != HSPM_FBDM_BEST0616_MODEL:
+        parser.error("--use_base_seg is only supported by CMUNeXt_HSPM_FBDM_Best0616.")
+
     if args.fbdm_semantic_uncertainty_weight < 0 or args.fbdm_semantic_coarse_weight < 0:
         parser.error("FBDM semantic prior weights must be non-negative.")
     if not 0.0 <= args.fbdm_semantic_gate_base <= 1.0:
@@ -907,8 +955,8 @@ if __name__ == "__main__":
         args.fbdm_boundary_band_loss_final_weight is not None
         and args.fbdm_boundary_band_loss_final_weight > 0
     )
-    if boundary_band_enabled and args.model not in HSPM_FBDM_V2_MODELS:
-        parser.error("--fbdm_boundary_band_loss_weight is only supported by CMUNeXt_HSPM_FBDM_V2.")
+    if boundary_band_enabled and args.model not in HSPM_FBDM_CORRECTION_MODELS:
+        parser.error("--fbdm_boundary_band_loss_weight requires a logit-correction model.")
     if args.visual_mode == "selected" and not args.visual_case:
         parser.error("--visual_case is required when --visual_mode selected")
 
