@@ -60,6 +60,7 @@ class ProtectedBest0616Tests(unittest.TestCase):
 
     def test_zero_and_disabled_correction_are_exact_identity(self):
         model = self._model().eval()
+        model.set_fbdm_correction_schedule_scale(0.0)
         image, _ = self._sample()
 
         with torch.no_grad():
@@ -98,7 +99,7 @@ class ProtectedBest0616Tests(unittest.TestCase):
             model.fbdm_correction.correction_head.bias.fill_(20.0)
             model.fbdm_correction.correction_scale_raw.fill_(20.0)
             outputs = model(self._sample()[0])
-        self.assertLessEqual(outputs["logit_correction"].abs().max().item(), 0.10 + 1e-6)
+        self.assertLessEqual(outputs["logit_correction"].abs().max().item(), 0.20 + 1e-6)
 
     def test_edge_loss_does_not_reach_hspm(self):
         model = self._model().train()
@@ -133,6 +134,10 @@ class ProtectedBest0616Tests(unittest.TestCase):
             model.fbdm_correction.correction_head.weight.grad.abs().sum().item(),
             0.0,
         )
+        self.assertGreater(
+            model.fbdm1.fusion[0].weight.grad.abs().sum().item(),
+            0.0,
+        )
         self.assertIsNone(model.Conv_1x1.weight.grad)
         self.assertIsNone(model.Up_conv2.conv[0].weight.grad)
 
@@ -149,6 +154,47 @@ class ProtectedBest0616Tests(unittest.TestCase):
         (components["seg"] + components["coarse_weighted"]).backward()
         self.assertIsNotNone(model.Conv_1x1.weight.grad)
         self.assertIsNotNone(model.prototype_mixer.coarse_head.weight.grad)
+
+    def test_optimizer_groups_preserve_one_two_five_lr_ratios(self):
+        model = self._model()
+        args = Namespace(
+            model=training_main.HSPM_FBDM_BEST0616_MODEL,
+            base_lr=0.01,
+            fbdm_lr_multiplier=2.0,
+            fbdm_correction_lr_multiplier=5.0,
+        )
+        optimizer = training_main.build_optimizer(args, model)
+
+        self.assertEqual(
+            [group["group_name"] for group in optimizer.param_groups],
+            ["hspm", "fbdm", "correction"],
+        )
+        self.assertEqual(
+            [group["lr_multiplier"] for group in optimizer.param_groups],
+            [1.0, 2.0, 5.0],
+        )
+        for polynomial_lr in (0.01, 0.004, 0.0001):
+            for group in optimizer.param_groups:
+                group["lr"] = polynomial_lr * group["lr_multiplier"]
+            self.assertEqual(
+                [group["lr"] / polynomial_lr for group in optimizer.param_groups],
+                [1.0, 2.0, 5.0],
+            )
+
+    def test_boundary_feature_and_correction_diagnostics_are_active(self):
+        model = self._model().eval()
+        model.set_fbdm_correction_schedule_scale(1.0)
+        with torch.no_grad():
+            model(self._sample()[0])
+
+        self.assertEqual(
+            model.fbdm1.last_boundary_feature.shape,
+            (2, SMALL_DIMS[0], 32, 32),
+        )
+        diagnostics = model.get_fbdm_v2_diagnostics()
+        self.assertGreater(diagnostics["boundary_feature_rms"].item(), 0.0)
+        self.assertGreaterEqual(diagnostics["safe_boundary_gate_mean"].item(), 0.20)
+        self.assertIn("raw_correction_abs_max", diagnostics)
 
 
 if __name__ == "__main__":

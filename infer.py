@@ -215,8 +215,10 @@ def apply_best0616_presets(args):
         args.hspm_coarse_loss_final_weight = 0.02
         args.hspm_coarse_loss_decay_epochs = 150
         args.fbdm_edge_loss_type = "balanced_bce_dice"
-        args.fbdm_correction_scale_init = 0.02
-        args.fbdm_correction_scale_max = 0.10
+        args.fbdm_edge_kernel_size = 5
+        args.fbdm_correction_scale_init = 0.05
+        args.fbdm_correction_scale_max = 0.20
+        args.fbdm_boundary_gate_floor = 0.20
     return args
 
 
@@ -302,6 +304,7 @@ def build_model(args, parser):
             fbdm_gate_max=args.fbdm_gate_max,
             fbdm_correction_scale_init=args.fbdm_correction_scale_init,
             fbdm_correction_scale_max=args.fbdm_correction_scale_max,
+            fbdm_boundary_gate_floor=args.fbdm_boundary_gate_floor,
         )
     elif args.model == "CMUNeXt_HSPM_FBDM":
         model = cmunext_hspm_fbdm(
@@ -882,6 +885,8 @@ if __name__ == "__main__":
                         help="Initial effective bounded logit-correction scale for FBDM V2")
     parser.add_argument("--fbdm_correction_scale_max", type=float, default=0.3,
                         help="Maximum effective bounded logit-correction scale for FBDM V2")
+    parser.add_argument("--fbdm_boundary_gate_floor", type=float, default=0.0,
+                        help="Minimum boundary gate used by protected FBDM correction")
     parser.add_argument("--fbdm_correction_warmup_epochs", type=int, default=40,
                         help="Training-only compatibility option; inference uses full correction scale")
     parser.add_argument("--fbdm_boundary_band_loss_weight", type=float, default=0.0,
@@ -938,6 +943,8 @@ if __name__ == "__main__":
         parser.error("--fbdm_edge_kernel_size must be a positive odd integer.")
     if not 0.0 < args.fbdm_correction_scale_init < args.fbdm_correction_scale_max:
         parser.error("--fbdm_correction_scale_init must be in (0, --fbdm_correction_scale_max).")
+    if not 0.0 <= args.fbdm_boundary_gate_floor < 1.0:
+        parser.error("--fbdm_boundary_gate_floor must be in [0, 1).")
     if args.fbdm_correction_warmup_epochs < 0:
         parser.error("--fbdm_correction_warmup_epochs must be non-negative.")
     if args.fbdm_boundary_band_loss_weight < 0:

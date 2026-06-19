@@ -66,6 +66,7 @@ class HSPMFBDMTests(unittest.TestCase):
 
         self.assertTrue(torch.equal(out, x))
         self.assertEqual(edge_logits.shape, (2, 1, 16, 16))
+        self.assertEqual(module.last_boundary_feature.shape, x.shape)
         edge_logits.mean().backward()
         self.assertIsNotNone(x.grad)
         self.assertIsNotNone(module.edge_head.weight.grad)

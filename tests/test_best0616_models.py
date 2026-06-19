@@ -291,6 +291,7 @@ class Best0616ModelTests(unittest.TestCase):
             depths=SMALL_DEPTHS,
             kernels=SMALL_KERNELS,
         ).eval()
+        model.set_fbdm_correction_schedule_scale(0.0)
 
         with torch.no_grad():
             outputs = model(torch.randn(2, 3, 32, 32))
@@ -324,7 +325,12 @@ class Best0616ModelTests(unittest.TestCase):
         self.assertTrue(model.fbdm1.detach_hspm_prior)
         self.assertAlmostEqual(model.fbdm1.effective_gamma().item(), 0.01, places=5)
         self.assertEqual(model.fbdm1.gate_max, 0.06)
-        self.assertEqual(model.fbdm_correction.correction_scale_max, 0.10)
+        self.assertEqual(model.fbdm_correction.correction_scale_max, 0.20)
+        self.assertEqual(model.fbdm_correction.boundary_gate_floor, 0.20)
+        self.assertEqual(
+            model.fbdm1.last_boundary_feature.shape,
+            (2, SMALL_DIMS[0], 32, 32),
+        )
         self.assertIsNotNone(model.last_fusion_diagnostics)
 
     def test_hspm_fbdm_best0616_loss_backward(self):
@@ -341,7 +347,7 @@ class Best0616ModelTests(unittest.TestCase):
             coarse_weight=0.1,
             edge_weight=0.03,
             protected_refinement=True,
-            refine_weight=0.5,
+            refine_weight=1.0,
             preserve_weight=1.0,
         )(outputs, target, return_components=True)
 
@@ -393,11 +399,27 @@ class Best0616ModelTests(unittest.TestCase):
         self.assertEqual(hspm_fbdm_args.hspm_coarse_loss_final_weight, 0.02)
         self.assertEqual(hspm_fbdm_args.hspm_coarse_loss_decay_epochs, 150)
         self.assertEqual(hspm_fbdm_args.fbdm_edge_loss_type, "balanced_bce_dice")
-        self.assertEqual(hspm_fbdm_args.fbdm_correction_scale_init, 0.02)
-        self.assertEqual(hspm_fbdm_args.fbdm_correction_scale_max, 0.10)
+        self.assertEqual(hspm_fbdm_args.fbdm_edge_kernel_size, 5)
+        self.assertEqual(hspm_fbdm_args.fbdm_correction_scale_init, 0.05)
+        self.assertEqual(hspm_fbdm_args.fbdm_correction_scale_max, 0.20)
+        self.assertEqual(hspm_fbdm_args.fbdm_boundary_gate_floor, 0.20)
         self.assertEqual(hspm_fbdm_args.fbdm_correction_start_epoch, 40)
-        self.assertEqual(hspm_fbdm_args.fbdm_refine_loss_weight, 0.5)
+        self.assertEqual(hspm_fbdm_args.fbdm_correction_warmup_epochs, 40)
+        self.assertEqual(hspm_fbdm_args.fbdm_refine_loss_weight, 1.0)
         self.assertEqual(hspm_fbdm_args.fbdm_preserve_loss_weight, 1.0)
+        self.assertEqual(hspm_fbdm_args.fbdm_boundary_band_loss_weight, 0.10)
+        self.assertEqual(hspm_fbdm_args.fbdm_boundary_band_loss_final_weight, 0.02)
+        self.assertEqual(hspm_fbdm_args.fbdm_boundary_band_loss_decay_epochs, 150)
+        self.assertEqual(hspm_fbdm_args.fbdm_lr_multiplier, 2.0)
+        self.assertEqual(hspm_fbdm_args.fbdm_correction_lr_multiplier, 5.0)
+
+        inference_args = inference_main.apply_best0616_presets(
+            Namespace(model=training_main.HSPM_FBDM_BEST0616_MODEL)
+        )
+        self.assertEqual(inference_args.fbdm_edge_kernel_size, 5)
+        self.assertEqual(inference_args.fbdm_correction_scale_init, 0.05)
+        self.assertEqual(inference_args.fbdm_correction_scale_max, 0.20)
+        self.assertEqual(inference_args.fbdm_boundary_gate_floor, 0.20)
 
     def test_edge_loss_cli_defaults_and_best0616_presets_are_compatible(self):
         self.assertEqual(training_main.args.fbdm_edge_loss_type, "legacy")

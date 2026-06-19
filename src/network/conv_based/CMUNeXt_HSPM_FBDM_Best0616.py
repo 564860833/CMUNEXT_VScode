@@ -12,8 +12,9 @@ class SafeBoundaryLogitCorrection(nn.Module):
         self,
         channels,
         logit_channels=1,
-        correction_scale_init=0.02,
-        correction_scale_max=0.10,
+        correction_scale_init=0.05,
+        correction_scale_max=0.20,
+        boundary_gate_floor=0.20,
     ):
         super().__init__()
         if channels <= 0 or logit_channels <= 0:
@@ -22,16 +23,21 @@ class SafeBoundaryLogitCorrection(nn.Module):
             raise ValueError(
                 "correction_scale_init must be in (0, correction_scale_max)."
             )
+        if not 0.0 <= boundary_gate_floor < 1.0:
+            raise ValueError("boundary_gate_floor must be in [0, 1).")
 
         self.correction_scale_max = float(correction_scale_max)
+        self.boundary_gate_floor = float(boundary_gate_floor)
         self.schedule_scale = 1.0
         self.last_boundary_gate = None
         self.last_base_logits = None
+        self.last_boundary_feature = None
+        self.last_safe_boundary_gate = None
         self.last_raw_correction = None
         self.last_logit_correction = None
         self.last_final_logits = None
 
-        correction_in_channels = channels + 2 * logit_channels + 1
+        correction_in_channels = 2 * channels + 2 * logit_channels + 1
         norm_groups = min(4, channels)
         while channels % norm_groups != 0:
             norm_groups -= 1
@@ -51,7 +57,7 @@ class SafeBoundaryLogitCorrection(nn.Module):
             nn.GELU(),
         )
         self.correction_head = nn.Conv2d(channels, logit_channels, kernel_size=1)
-        nn.init.zeros_(self.correction_head.weight)
+        nn.init.normal_(self.correction_head.weight, mean=0.0, std=1e-3)
         nn.init.zeros_(self.correction_head.bias)
 
         correction_ratio = float(correction_scale_init) / self.correction_scale_max
@@ -69,6 +75,9 @@ class SafeBoundaryLogitCorrection(nn.Module):
         if self.last_boundary_gate is None:
             return None
         boundary_gate = self.last_boundary_gate.detach()
+        boundary_feature = self.last_boundary_feature.detach()
+        safe_boundary_gate = self.last_safe_boundary_gate.detach()
+        raw_correction = self.last_raw_correction.detach()
         logit_correction = self.last_logit_correction.detach()
         base_prediction = self.last_base_logits.detach() > 0
         final_prediction = self.last_final_logits.detach() > 0
@@ -79,6 +88,10 @@ class SafeBoundaryLogitCorrection(nn.Module):
             "boundary_gate_over_05": (
                 boundary_gate > 0.5
             ).to(boundary_gate.dtype).mean(),
+            "safe_boundary_gate_mean": safe_boundary_gate.mean(),
+            "boundary_feature_rms": boundary_feature.square().mean().sqrt(),
+            "raw_correction_abs_mean": raw_correction.abs().mean(),
+            "raw_correction_abs_max": raw_correction.abs().max(),
             "logit_correction_abs_mean": logit_correction.abs().mean(),
             "logit_correction_abs_max": logit_correction.abs().max(),
             "prediction_flip_ratio": (
@@ -86,16 +99,28 @@ class SafeBoundaryLogitCorrection(nn.Module):
             ).to(boundary_gate.dtype).mean(),
         }
 
-    def forward(self, feature, base_logits, edge_logits, boundary_gate):
+    def forward(
+        self,
+        feature,
+        boundary_feature,
+        base_logits,
+        edge_logits,
+        boundary_gate,
+    ):
         detached_feature = feature.detach()
         base_probability = torch.sigmoid(base_logits.detach())
         edge_probability = torch.sigmoid(edge_logits)
         detached_boundary_gate = boundary_gate.detach()
+        safe_boundary_gate = (
+            self.boundary_gate_floor
+            + (1.0 - self.boundary_gate_floor) * detached_boundary_gate
+        )
         raw_correction = self.correction_head(
             self.correction_features(
                 torch.cat(
                     [
                         detached_feature,
+                        boundary_feature,
                         base_probability,
                         edge_probability,
                         detached_boundary_gate,
@@ -106,13 +131,15 @@ class SafeBoundaryLogitCorrection(nn.Module):
         )
         logit_correction = (
             self.schedule_scale
-            * detached_boundary_gate
+            * safe_boundary_gate
             * self.effective_correction_scale()
             * torch.tanh(raw_correction)
         )
         final_logits = base_logits + logit_correction
 
         self.last_boundary_gate = detached_boundary_gate
+        self.last_boundary_feature = boundary_feature
+        self.last_safe_boundary_gate = safe_boundary_gate
         self.last_base_logits = base_logits
         self.last_raw_correction = raw_correction
         self.last_logit_correction = logit_correction
@@ -139,8 +166,9 @@ class CMUNeXt_HSPM_FBDM_Best0616(CMUNeXt_HSPM):
         fbdm_semantic_gate_base=0.7,
         fbdm_gate_init=0.01,
         fbdm_gate_max=0.06,
-        fbdm_correction_scale_init=0.02,
-        fbdm_correction_scale_max=0.10,
+        fbdm_correction_scale_init=0.05,
+        fbdm_correction_scale_max=0.20,
+        fbdm_boundary_gate_floor=0.20,
     ):
         super().__init__(
             input_channel=input_channel,
@@ -181,6 +209,7 @@ class CMUNeXt_HSPM_FBDM_Best0616(CMUNeXt_HSPM):
                 logit_channels=num_classes,
                 correction_scale_init=fbdm_correction_scale_init,
                 correction_scale_max=fbdm_correction_scale_max,
+                boundary_gate_floor=fbdm_boundary_gate_floor,
             )
 
     def set_fbdm_correction_schedule_scale(self, scale):
@@ -225,12 +254,16 @@ class CMUNeXt_HSPM_FBDM_Best0616(CMUNeXt_HSPM):
             uncertainty=uncertainty.detach(),
         )
         boundary_gate = self.fbdm1.last_boundary_gate
+        boundary_feature = self.fbdm1.last_boundary_feature
         if boundary_gate is None:
             raise RuntimeError("FBDM boundary gate was not recorded before correction.")
+        if boundary_feature is None:
+            raise RuntimeError("FBDM boundary feature was not recorded before correction.")
 
         base_logits = self.Conv_1x1(d2)
         final_logits, logit_correction = self.fbdm_correction(
             d2,
+            boundary_feature,
             base_logits,
             edge_logits,
             boundary_gate,

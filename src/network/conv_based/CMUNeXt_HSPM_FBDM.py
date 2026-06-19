@@ -151,6 +151,7 @@ class FBDM(nn.Module):
         self.gamma_raw = nn.Parameter(torch.tensor(_inverse_sigmoid(gate_ratio), dtype=torch.float32))
         self.residual_scale = 1.0
         self.last_boundary_gate = None
+        self.last_boundary_feature = None
         self.last_edge_logits = None
 
     def effective_gamma(self):
@@ -226,6 +227,7 @@ class FBDM(nn.Module):
         out = x + self.effective_gamma() * gate * residual
         edge_logits = self.edge_head(out)
         self.last_boundary_gate = boundary_gate
+        self.last_boundary_feature = residual
         self.last_edge_logits = edge_logits
         main_feature = x if self.edge_aux_only else out
         return main_feature, edge_logits

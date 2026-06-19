@@ -92,6 +92,10 @@ FBDM_V2_DIAGNOSTIC_NAMES = (
     "effective_correction_scale",
     "boundary_gate_mean",
     "boundary_gate_over_05",
+    "safe_boundary_gate_mean",
+    "boundary_feature_rms",
+    "raw_correction_abs_mean",
+    "raw_correction_abs_max",
     "logit_correction_abs_mean",
     "logit_correction_abs_max",
     "prediction_flip_ratio",
@@ -248,15 +252,19 @@ def apply_best0616_presets(args):
         args.fbdm_edge_loss_decay_epochs = 150
     if args.model == HSPM_FBDM_BEST0616_MODEL:
         args.fbdm_edge_loss_type = "balanced_bce_dice"
-        args.fbdm_correction_scale_init = 0.02
-        args.fbdm_correction_scale_max = 0.10
+        args.fbdm_edge_kernel_size = 5
+        args.fbdm_correction_scale_init = 0.05
+        args.fbdm_correction_scale_max = 0.20
+        args.fbdm_boundary_gate_floor = 0.20
         args.fbdm_correction_start_epoch = 40
         args.fbdm_correction_warmup_epochs = 40
-        args.fbdm_refine_loss_weight = 0.5
+        args.fbdm_refine_loss_weight = 1.0
         args.fbdm_preserve_loss_weight = 1.0
-        args.fbdm_boundary_band_loss_weight = 0.02
-        args.fbdm_boundary_band_loss_final_weight = 0.005
+        args.fbdm_boundary_band_loss_weight = 0.10
+        args.fbdm_boundary_band_loss_final_weight = 0.02
         args.fbdm_boundary_band_loss_decay_epochs = 150
+        args.fbdm_lr_multiplier = 2.0
+        args.fbdm_correction_lr_multiplier = 5.0
     if args.model == HSPM_BEST0616_MODEL:
         args.hspm_mode = "full"
         args.hspm_backbone_mode = "dual_path"
@@ -426,6 +434,12 @@ parser.add_argument('--fbdm_correction_scale_init', type=float, default=0.05,
                     help='Initial effective bounded logit-correction scale for FBDM V2')
 parser.add_argument('--fbdm_correction_scale_max', type=float, default=0.3,
                     help='Maximum effective bounded logit-correction scale for FBDM V2')
+parser.add_argument('--fbdm_boundary_gate_floor', type=float, default=0.0,
+                    help='Minimum boundary gate used by protected FBDM correction')
+parser.add_argument('--fbdm_lr_multiplier', type=float, default=1.0,
+                    help='Learning-rate multiplier for the protected FBDM feature branch')
+parser.add_argument('--fbdm_correction_lr_multiplier', type=float, default=1.0,
+                    help='Learning-rate multiplier for the protected correction branch')
 parser.add_argument('--fbdm_correction_warmup_epochs', type=int, default=40,
                     help='Epochs used to linearly warm up FBDM V2 logit correction')
 parser.add_argument('--fbdm_correction_start_epoch', type=int, default=0,
@@ -545,6 +559,7 @@ def get_model(args):
             fbdm_gate_max=args.fbdm_gate_max,
             fbdm_correction_scale_init=args.fbdm_correction_scale_init,
             fbdm_correction_scale_max=args.fbdm_correction_scale_max,
+            fbdm_boundary_gate_floor=args.fbdm_boundary_gate_floor,
         ).cuda()
     elif args.model == "CMUNeXt_HSPM_FBDM":
         model = cmunext_hspm_fbdm(
@@ -1070,6 +1085,62 @@ def getDataloader(args):
     return trainloader, valloader
 
 
+def build_optimizer(args, model):
+    if args.model != HSPM_FBDM_BEST0616_MODEL:
+        trainable_parameters = [
+            parameter for parameter in model.parameters() if parameter.requires_grad
+        ]
+        return optim.SGD(
+            trainable_parameters,
+            lr=args.base_lr,
+            momentum=0.9,
+            weight_decay=0.0001,
+        )
+
+    fbdm_parameters = [
+        parameter for parameter in model.fbdm1.parameters() if parameter.requires_grad
+    ]
+    correction_parameters = [
+        parameter
+        for parameter in model.fbdm_correction.parameters()
+        if parameter.requires_grad
+    ]
+    branch_parameter_ids = {
+        id(parameter) for parameter in fbdm_parameters + correction_parameters
+    }
+    hspm_parameters = [
+        parameter
+        for parameter in model.parameters()
+        if parameter.requires_grad and id(parameter) not in branch_parameter_ids
+    ]
+    parameter_groups = [
+        {
+            "params": hspm_parameters,
+            "lr": args.base_lr,
+            "lr_multiplier": 1.0,
+            "group_name": "hspm",
+        },
+        {
+            "params": fbdm_parameters,
+            "lr": args.base_lr * args.fbdm_lr_multiplier,
+            "lr_multiplier": args.fbdm_lr_multiplier,
+            "group_name": "fbdm",
+        },
+        {
+            "params": correction_parameters,
+            "lr": args.base_lr * args.fbdm_correction_lr_multiplier,
+            "lr_multiplier": args.fbdm_correction_lr_multiplier,
+            "group_name": "correction",
+        },
+    ]
+    return optim.SGD(
+        parameter_groups,
+        lr=args.base_lr,
+        momentum=0.9,
+        weight_decay=0.0001,
+    )
+
+
 def main(args):
     validate_sampling_args(args)
     if args.model in USLGSF_V3_MODELS:
@@ -1103,6 +1174,10 @@ def main(args):
         raise ValueError("FBDM schedule epochs must be non-negative.")
     if not 0.0 < args.fbdm_correction_scale_init < args.fbdm_correction_scale_max:
         raise ValueError("FBDM V2 correction scale init must be in (0, correction scale max).")
+    if not 0.0 <= args.fbdm_boundary_gate_floor < 1.0:
+        raise ValueError("fbdm_boundary_gate_floor must be in [0, 1).")
+    if args.fbdm_lr_multiplier <= 0 or args.fbdm_correction_lr_multiplier <= 0:
+        raise ValueError("FBDM learning-rate multipliers must be positive.")
     if args.fbdm_correction_warmup_epochs < 0 or args.fbdm_correction_start_epoch < 0:
         raise ValueError("FBDM correction schedule epochs must be non-negative.")
     if args.fbdm_refine_loss_weight < 0 or args.fbdm_preserve_loss_weight < 0:
@@ -1162,14 +1237,17 @@ def main(args):
         val_thresholds,
         args.val_threshold_metric,
     )
-    trainable_parameters = [
-        parameter for parameter in model.parameters() if parameter.requires_grad
-    ]
-    optimizer = optim.SGD(
-        trainable_parameters,
-        lr=base_lr,
-        momentum=0.9,
-        weight_decay=0.0001,
+    optimizer = build_optimizer(args, model)
+    logging.info(
+        "Optimizer groups: %s",
+        ", ".join(
+            "%s=%.2fx"
+            % (
+                group.get("group_name", "default"),
+                group.get("lr_multiplier", 1.0),
+            )
+            for group in optimizer.param_groups
+        ),
     )
 
     # <=== 修改 7: 将 print 替换为 logging.info
@@ -1309,7 +1387,7 @@ def main(args):
 
             lr_ = base_lr * (1.0 - iter_num / max_iterations) ** 0.9
             for param_group in optimizer.param_groups:
-                param_group['lr'] = lr_
+                param_group['lr'] = lr_ * param_group.get('lr_multiplier', 1.0)
 
             iter_num = iter_num + 1
             avg_meters['loss'].update(loss.item(), img_batch.size(0))
@@ -1603,19 +1681,59 @@ def main(args):
                 avg_meters["val_fbdm_edge_pred_positive_ratio"].avg,
             )
             if args.model in HSPM_FBDM_CORRECTION_MODELS:
-                logging.info(
-                    "FBDM-v2 correction: schedule=%.4f - scale=%.6f"
-                    " - boundary_gate_mean=%.6f - boundary_gate>0.5=%.6f"
-                    " - logit_correction_mean=%.6f - logit_correction_max=%.6f"
-                    " - prediction_flip_ratio=%.6f",
-                    avg_meters["fbdm_v2_correction_schedule_scale"].avg,
-                    avg_meters["fbdm_v2_effective_correction_scale"].avg,
-                    avg_meters["fbdm_v2_boundary_gate_mean"].avg,
-                    avg_meters["fbdm_v2_boundary_gate_over_05"].avg,
-                    avg_meters["fbdm_v2_logit_correction_abs_mean"].avg,
-                    avg_meters["fbdm_v2_logit_correction_abs_max"].avg,
-                    avg_meters["fbdm_v2_prediction_flip_ratio"].avg,
+                if args.model == HSPM_FBDM_BEST0616_MODEL:
+                    logging.info(
+                        "FBDM-v2 correction: schedule=%.4f - scale=%.6f"
+                        " - boundary_gate_mean=%.6f - boundary_gate>0.5=%.6f"
+                        " - safe_gate_mean=%.6f - boundary_feature_rms=%.6f"
+                        " - raw_correction_mean=%.6f - raw_correction_max=%.6f"
+                        " - logit_correction_mean=%.6f - logit_correction_max=%.6f"
+                        " - prediction_flip_ratio=%.6f",
+                        avg_meters["fbdm_v2_correction_schedule_scale"].avg,
+                        avg_meters["fbdm_v2_effective_correction_scale"].avg,
+                        avg_meters["fbdm_v2_boundary_gate_mean"].avg,
+                        avg_meters["fbdm_v2_boundary_gate_over_05"].avg,
+                        avg_meters["fbdm_v2_safe_boundary_gate_mean"].avg,
+                        avg_meters["fbdm_v2_boundary_feature_rms"].avg,
+                        avg_meters["fbdm_v2_raw_correction_abs_mean"].avg,
+                        avg_meters["fbdm_v2_raw_correction_abs_max"].avg,
+                        avg_meters["fbdm_v2_logit_correction_abs_mean"].avg,
+                        avg_meters["fbdm_v2_logit_correction_abs_max"].avg,
+                        avg_meters["fbdm_v2_prediction_flip_ratio"].avg,
+                    )
+                else:
+                    logging.info(
+                        "FBDM-v2 correction: schedule=%.4f - scale=%.6f"
+                        " - boundary_gate_mean=%.6f - boundary_gate>0.5=%.6f"
+                        " - logit_correction_mean=%.6f - logit_correction_max=%.6f"
+                        " - prediction_flip_ratio=%.6f",
+                        avg_meters["fbdm_v2_correction_schedule_scale"].avg,
+                        avg_meters["fbdm_v2_effective_correction_scale"].avg,
+                        avg_meters["fbdm_v2_boundary_gate_mean"].avg,
+                        avg_meters["fbdm_v2_boundary_gate_over_05"].avg,
+                        avg_meters["fbdm_v2_logit_correction_abs_mean"].avg,
+                        avg_meters["fbdm_v2_logit_correction_abs_max"].avg,
+                        avg_meters["fbdm_v2_prediction_flip_ratio"].avg,
+                    )
+                activation_epoch = (
+                    args.fbdm_correction_start_epoch
+                    + args.fbdm_correction_warmup_epochs
                 )
+                if (
+                    args.model == HSPM_FBDM_BEST0616_MODEL
+                    and epoch_num == activation_epoch
+                    and (
+                        avg_meters["fbdm_v2_logit_correction_abs_max"].avg < 0.01
+                        or avg_meters["fbdm_v2_prediction_flip_ratio"].avg <= 0.0
+                    )
+                ):
+                    logging.warning(
+                        "FBDM correction remains under-active at epoch %d:"
+                        " correction_max=%.6f, prediction_flip_ratio=%.6f.",
+                        epoch_num,
+                        avg_meters["fbdm_v2_logit_correction_abs_max"].avg,
+                        avg_meters["fbdm_v2_prediction_flip_ratio"].avg,
+                    )
             if args.model == HSPM_FBDM_BEST0616_MODEL:
                 logging.info(
                     "Protected HSPM-FBDM metrics: refine_weight=%.4f"
