@@ -55,3 +55,6 @@ tools/*
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Codex scratch workspace
+.codex-scratch/
