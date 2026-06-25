@@ -21,6 +21,7 @@ from src.network.conv_based.CMUNeXt_USLGSF_V2 import cmunext_uslgsf_v2
 from src.network.conv_based.CMUNeXt_USLGSF_V3 import cmunext_uslgsf_v3
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
 from src.network.conv_based.CMUNeXt_HSPM_Best0616 import cmunext_hspm_best0616
+from src.network.conv_based.CMUNeXt_HSPM_Best0619 import cmunext_hspm_best0619
 from src.network.conv_based.CMUNeXt_HSPM_FBDM import cmunext_hspm_fbdm, cmunext_hspm_fbdm_v2
 from src.network.conv_based.CMUNeXt_HSPM_FBDM_Best0616 import cmunext_hspm_fbdm_best0616
 from src.network.conv_based.CMUNeXt_HSPM_FBDM_0619 import cmunext_hspm_fbdm_0619
@@ -53,8 +54,9 @@ HSPM_FBDM_MODELS = {
 }
 FBDM_BEST0616_MODEL = "CMUNeXt_FBDM_Best0616"
 HSPM_BEST0616_MODEL = "CMUNeXt_HSPM_Best0616"
+HSPM_BEST0619_MODEL = "CMUNeXt_HSPM_Best0619"
 FBDM_ONLY_MODELS = {"CMUNeXt_FBDM", FBDM_BEST0616_MODEL}
-HSPM_ONLY_MODELS = {"CMUNeXt_HSPM", HSPM_BEST0616_MODEL}
+HSPM_ONLY_MODELS = {"CMUNeXt_HSPM", HSPM_BEST0616_MODEL, HSPM_BEST0619_MODEL}
 HSPM_MODELS = {*HSPM_ONLY_MODELS, *HSPM_FBDM_MODELS}
 
 
@@ -207,6 +209,20 @@ def apply_best0616_presets(args):
         args.hspm_coarse_loss_weight = 0.1
         args.hspm_coarse_loss_final_weight = 0.02
         args.hspm_coarse_loss_decay_epochs = 150
+    if args.model == HSPM_BEST0619_MODEL:
+        args.hspm_mode = "full"
+        args.hspm_backbone_mode = "dual_path"
+        args.hspm_fusion_mode = "global"
+        args.hspm_mixer_mode = "bounded"
+        args.hspm_gamma_init = 0.1
+        args.hspm_gamma_max = 0.35
+        args.hspm_temperature = 0.1
+        args.hspm_prototype_dropout = 0.0
+        args.hspm_fusion_gate_init = 0.05
+        args.hspm_fusion_gate_max = 0.3
+        args.hspm_coarse_loss_weight = 0.1
+        args.hspm_coarse_loss_final_weight = 0.02
+        args.hspm_coarse_loss_decay_epochs = 150
     if args.model in {HSPM_FBDM_BEST0616_MODEL, HSPM_FBDM_0619_MODEL}:
         args.hspm_mode = "full"
         args.hspm_backbone_mode = "dual_path"
@@ -307,6 +323,8 @@ def build_model(args, parser):
         )
     elif args.model == HSPM_BEST0616_MODEL:
         model = cmunext_hspm_best0616(num_classes=args.num_classes)
+    elif args.model == HSPM_BEST0619_MODEL:
+        model = cmunext_hspm_best0619(num_classes=args.num_classes)
     elif args.model == HSPM_FBDM_BEST0616_MODEL:
         model = cmunext_hspm_fbdm_best0616(
             num_classes=args.num_classes,
@@ -785,7 +803,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Validation script for medical image segmentation")
 
     model_choices = [
-        "CMUNet", "CMUNeXt", "CMUNeXt_FBDM", FBDM_BEST0616_MODEL, "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", HSPM_BEST0616_MODEL, "CMUNeXt_HSPM_FBDM", HSPM_FBDM_BEST0616_MODEL, HSPM_FBDM_0619_MODEL, "CMUNeXt_HSPM_FBDM_V2",
+        "CMUNet", "CMUNeXt", "CMUNeXt_FBDM", FBDM_BEST0616_MODEL, "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", HSPM_BEST0616_MODEL, HSPM_BEST0619_MODEL, "CMUNeXt_HSPM_FBDM", HSPM_FBDM_BEST0616_MODEL, HSPM_FBDM_0619_MODEL, "CMUNeXt_HSPM_FBDM_V2",
         "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
         "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
         "CMUNeXt_BA_DualGAG_SpeckleEnhance",

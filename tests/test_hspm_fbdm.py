@@ -1,9 +1,11 @@
 import unittest
+import copy
 import sys
 from argparse import Namespace
 from unittest import mock
 
 import torch
+import torch.nn.functional as F
 
 with mock.patch.object(sys, "argv", ["main.py"]):
     import main as training_main
@@ -321,6 +323,7 @@ class HSPMFBDMTests(unittest.TestCase):
             semantic_uncertainty_weight=7.0,
             semantic_coarse_weight=3.0,
         ).eval()
+        self.assertEqual(module.semantic_coarse_mode, "prob")
         x = torch.ones(1, 1, 8, 8)
         coarse_logits = torch.zeros(1, 1, 2, 2)
         uncertainty = torch.zeros(1, 1, 2, 2)
@@ -343,6 +346,51 @@ class HSPMFBDMTests(unittest.TestCase):
             uncertainty=torch.full_like(uncertainty, 2.0),
         )
         self.assertLessEqual(semantic_prior.max().item(), 1.0)
+
+    def test_semantic_coarse_edge_mode_uses_sobel_of_resized_coarse_probability(self):
+        module = FBDM(
+            channels=1,
+            semantic_uncertainty_weight=0.0,
+            semantic_coarse_weight=1.0,
+            semantic_coarse_mode="edge",
+        ).eval()
+        prob_module = FBDM(
+            channels=1,
+            semantic_uncertainty_weight=0.0,
+            semantic_coarse_weight=1.0,
+        ).eval()
+        x = torch.ones(1, 1, 8, 8)
+        coarse_logits = torch.tensor(
+            [[[[-6.0, -6.0], [6.0, 6.0]]]],
+            dtype=torch.float32,
+        )
+        uncertainty = torch.zeros_like(coarse_logits)
+
+        _, prob_prior, _ = prob_module.build_boundary_prior(
+            x,
+            coarse_logits=coarse_logits,
+            uncertainty=uncertainty,
+        )
+        _, edge_prior, _ = module.build_boundary_prior(
+            x,
+            coarse_logits=coarse_logits,
+            uncertainty=uncertainty,
+        )
+
+        coarse_prob = F.interpolate(
+            torch.sigmoid(coarse_logits),
+            size=x.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+        expected_edge_prior = module.sobel_edge(coarse_prob)
+        self.assertTrue(torch.allclose(prob_prior, coarse_prob))
+        self.assertTrue(torch.allclose(edge_prior, expected_edge_prior))
+        self.assertFalse(torch.allclose(edge_prior, prob_prior))
+
+    def test_semantic_coarse_mode_rejects_invalid_value(self):
+        with self.assertRaises(ValueError):
+            FBDM(channels=1, semantic_coarse_mode="mask")
 
     def test_hspm_prior_can_be_disabled(self):
         module = FBDM(channels=1, use_hspm_prior=False).eval()
@@ -370,6 +418,32 @@ class HSPMFBDMTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         loss.backward()
         self.assertIsNotNone(outputs["edge"].grad)
+
+    def test_get_model_passes_semantic_coarse_mode_only_to_standard_hspm_fbdm(self):
+        args = copy.deepcopy(training_main.args)
+        args.model = "CMUNeXt_HSPM_FBDM"
+        args.fbdm_semantic_coarse_mode = "edge"
+
+        with mock.patch.object(torch.nn.Module, "cuda", lambda self: self):
+            with mock.patch.object(
+                training_main,
+                "cmunext_hspm_fbdm",
+                return_value=torch.nn.Identity(),
+            ) as builder:
+                training_main.get_model(args)
+
+        self.assertEqual(builder.call_args.kwargs["fbdm_semantic_coarse_mode"], "edge")
+
+        args.model = "CMUNeXt_HSPM_FBDM_V2"
+        with mock.patch.object(torch.nn.Module, "cuda", lambda self: self):
+            with mock.patch.object(
+                training_main,
+                "cmunext_hspm_fbdm_v2",
+                return_value=torch.nn.Identity(),
+            ) as builder:
+                training_main.get_model(args)
+
+        self.assertNotIn("fbdm_semantic_coarse_mode", builder.call_args.kwargs)
 
 
 if __name__ == "__main__":

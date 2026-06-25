@@ -81,6 +81,7 @@ class FBDM(nn.Module):
         detach_hspm_prior=True,
         semantic_uncertainty_weight=0.7,
         semantic_coarse_weight=0.3,
+        semantic_coarse_mode="prob",
         semantic_gate_base=0.7,
         gate_init=0.03,
         gate_max=0.2,
@@ -98,6 +99,8 @@ class FBDM(nn.Module):
             raise ValueError("gate_init must be in (0, gate_max).")
         if semantic_uncertainty_weight < 0.0 or semantic_coarse_weight < 0.0:
             raise ValueError("semantic prior weights must be non-negative.")
+        if semantic_coarse_mode not in {"prob", "edge"}:
+            raise ValueError("semantic_coarse_mode must be either 'prob' or 'edge'.")
         if not 0.0 <= semantic_gate_base <= 1.0:
             raise ValueError("semantic_gate_base must be in [0, 1].")
 
@@ -106,6 +109,7 @@ class FBDM(nn.Module):
         self.detach_hspm_prior = bool(detach_hspm_prior)
         self.semantic_uncertainty_weight = float(semantic_uncertainty_weight)
         self.semantic_coarse_weight = float(semantic_coarse_weight)
+        self.semantic_coarse_mode = semantic_coarse_mode
         self.semantic_gate_base = float(semantic_gate_base)
         self.edge_aux_only = bool(edge_aux_only)
         self.eps = float(eps)
@@ -193,9 +197,12 @@ class FBDM(nn.Module):
             self.semantic_uncertainty_weight + self.semantic_coarse_weight,
             self.eps,
         )
+        coarse_prior = coarse_prob
+        if self.semantic_coarse_mode == "edge":
+            coarse_prior = self.sobel_edge(coarse_prob)
         semantic_prior = (
             self.semantic_uncertainty_weight / weight_sum * uncertainty_prior
-            + self.semantic_coarse_weight / weight_sum * coarse_prob
+            + self.semantic_coarse_weight / weight_sum * coarse_prior
         ).clamp(0.0, 1.0)
         boundary_gate = edge_prior * (
             self.semantic_gate_base
@@ -369,6 +376,7 @@ class CMUNeXt_HSPM_FBDM(CMUNeXt_HSPM):
         fbdm_detach_hspm_prior=True,
         fbdm_semantic_uncertainty_weight=0.7,
         fbdm_semantic_coarse_weight=0.3,
+        fbdm_semantic_coarse_mode="prob",
         fbdm_semantic_gate_base=0.7,
         fbdm_gate_init=0.03,
         fbdm_gate_max=0.2,
@@ -400,6 +408,7 @@ class CMUNeXt_HSPM_FBDM(CMUNeXt_HSPM):
             detach_hspm_prior=fbdm_detach_hspm_prior,
             semantic_uncertainty_weight=fbdm_semantic_uncertainty_weight,
             semantic_coarse_weight=fbdm_semantic_coarse_weight,
+            semantic_coarse_mode=fbdm_semantic_coarse_mode,
             semantic_gate_base=fbdm_semantic_gate_base,
             gate_init=fbdm_gate_init,
             gate_max=fbdm_gate_max,

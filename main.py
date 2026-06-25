@@ -42,6 +42,7 @@ from src.network.conv_based.CMUNeXt_USLGSF_V2 import cmunext_uslgsf_v2
 from src.network.conv_based.CMUNeXt_USLGSF_V3 import cmunext_uslgsf_v3
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
 from src.network.conv_based.CMUNeXt_HSPM_Best0616 import cmunext_hspm_best0616
+from src.network.conv_based.CMUNeXt_HSPM_Best0619 import cmunext_hspm_best0619
 from src.network.conv_based.CMUNeXt_HSPM_FBDM import cmunext_hspm_fbdm, cmunext_hspm_fbdm_v2
 from src.network.conv_based.CMUNeXt_HSPM_FBDM_Best0616 import cmunext_hspm_fbdm_best0616
 from src.network.conv_based.CMUNeXt_HSPM_FBDM_0619 import cmunext_hspm_fbdm_0619
@@ -74,9 +75,10 @@ HSPM_FBDM_MODELS = {
 }
 FBDM_BEST0616_MODEL = "CMUNeXt_FBDM_Best0616"
 HSPM_BEST0616_MODEL = "CMUNeXt_HSPM_Best0616"
+HSPM_BEST0619_MODEL = "CMUNeXt_HSPM_Best0619"
 FBDM_ONLY_MODELS = {"CMUNeXt_FBDM", FBDM_BEST0616_MODEL}
 FBDM_MODELS = {*HSPM_FBDM_MODELS, *FBDM_ONLY_MODELS}
-HSPM_ONLY_MODELS = {"CMUNeXt_HSPM", HSPM_BEST0616_MODEL}
+HSPM_ONLY_MODELS = {"CMUNeXt_HSPM", HSPM_BEST0616_MODEL, HSPM_BEST0619_MODEL}
 HSPM_MODELS = {*HSPM_ONLY_MODELS, *HSPM_FBDM_MODELS}
 USLGSF_V3_MODELS = {"CMUNeXt_USLGSF_V3"}
 USLGSF_V3_DIAGNOSTIC_NAMES = (
@@ -286,6 +288,20 @@ def apply_best0616_presets(args):
         args.hspm_coarse_loss_weight = 0.1
         args.hspm_coarse_loss_final_weight = 0.02
         args.hspm_coarse_loss_decay_epochs = 150
+    if args.model == HSPM_BEST0619_MODEL:
+        args.hspm_mode = "full"
+        args.hspm_backbone_mode = "dual_path"
+        args.hspm_fusion_mode = "global"
+        args.hspm_mixer_mode = "bounded"
+        args.hspm_gamma_init = 0.1
+        args.hspm_gamma_max = 0.35
+        args.hspm_temperature = 0.1
+        args.hspm_prototype_dropout = 0.0
+        args.hspm_fusion_gate_init = 0.05
+        args.hspm_fusion_gate_max = 0.3
+        args.hspm_coarse_loss_weight = 0.1
+        args.hspm_coarse_loss_final_weight = 0.02
+        args.hspm_coarse_loss_decay_epochs = 150
     if args.model in {HSPM_FBDM_BEST0616_MODEL, HSPM_FBDM_0619_MODEL}:
         args.hspm_mode = "full"
         args.hspm_backbone_mode = "dual_path"
@@ -333,7 +349,7 @@ def apply_best0616_presets(args):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default="CMUNeXt",
-                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_FBDM", FBDM_BEST0616_MODEL, "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", HSPM_BEST0616_MODEL, "CMUNeXt_HSPM_FBDM", HSPM_FBDM_BEST0616_MODEL, HSPM_FBDM_0619_MODEL, "CMUNeXt_HSPM_FBDM_V2",
+                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_FBDM", FBDM_BEST0616_MODEL, "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", HSPM_BEST0616_MODEL, HSPM_BEST0619_MODEL, "CMUNeXt_HSPM_FBDM", HSPM_FBDM_BEST0616_MODEL, HSPM_FBDM_0619_MODEL, "CMUNeXt_HSPM_FBDM_V2",
                              "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
                              "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
                              "CMUNeXt_BA_DualGAG_SpeckleEnhance",
@@ -434,6 +450,8 @@ parser.add_argument('--fbdm_semantic_uncertainty_weight', type=float, default=0.
                     help='Uncertainty weight in the FBDM semantic boundary prior')
 parser.add_argument('--fbdm_semantic_coarse_weight', type=float, default=0.3,
                     help='Coarse probability weight in the FBDM semantic boundary prior')
+parser.add_argument('--fbdm_semantic_coarse_mode', type=str, default="prob", choices=["prob", "edge"],
+                    help='Use coarse probability or Sobel edge of coarse probability in the FBDM semantic prior')
 parser.add_argument('--fbdm_semantic_gate_base', type=float, default=0.7,
                     help='Conservative base term in the FBDM boundary gate')
 parser.add_argument('--fbdm_gate_init', type=float, default=0.03,
@@ -580,6 +598,8 @@ def get_model(args):
         ).cuda()
     elif args.model == HSPM_BEST0616_MODEL:
         model = cmunext_hspm_best0616(num_classes=args.num_classes).cuda()
+    elif args.model == HSPM_BEST0619_MODEL:
+        model = cmunext_hspm_best0619(num_classes=args.num_classes).cuda()
     elif args.model == HSPM_FBDM_BEST0616_MODEL:
         model = cmunext_hspm_fbdm_best0616(
             num_classes=args.num_classes,
@@ -617,6 +637,7 @@ def get_model(args):
             fbdm_detach_hspm_prior=not args.fbdm_no_detach_hspm_prior,
             fbdm_semantic_uncertainty_weight=args.fbdm_semantic_uncertainty_weight,
             fbdm_semantic_coarse_weight=args.fbdm_semantic_coarse_weight,
+            fbdm_semantic_coarse_mode=args.fbdm_semantic_coarse_mode,
             fbdm_semantic_gate_base=args.fbdm_semantic_gate_base,
             fbdm_gate_init=args.fbdm_gate_init,
             fbdm_gate_max=args.fbdm_gate_max,
