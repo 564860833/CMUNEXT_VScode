@@ -17,9 +17,6 @@ from src.network.conv_based.CMUNeXt import cmunext
 from src.network.conv_based.CMUNeXt_BARM import cmunext_barm
 from src.network.conv_based.CMUNeXt_FBDM import cmunext_fbdm
 from src.network.conv_based.CMUNeXt_FBDM_Best0616 import cmunext_fbdm_best0616
-from src.network.conv_based.CMUNeXt_USLGSF import cmunext_uslgsf
-from src.network.conv_based.CMUNeXt_USLGSF_V2 import cmunext_uslgsf_v2
-from src.network.conv_based.CMUNeXt_USLGSF_V3 import cmunext_uslgsf_v3
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
 from src.network.conv_based.CMUNeXt_HSPM_BARM import cmunext_hspm_barm, cmunext_hspm_barm_hfbypass
 from src.network.conv_based.CMUNeXt_HSPM_Best0616 import cmunext_hspm_best0616
@@ -113,31 +110,6 @@ def parse_ddsr_stages(value):
     return tuple(stages)
 
 
-def parse_uslgsf_stages(value):
-    if isinstance(value, (tuple, list)):
-        return tuple(value)
-
-    stages = []
-    for item in str(value).split(","):
-        item = item.strip()
-        if not item:
-            raise argparse.ArgumentTypeError("uslgsf_stages must be a comma-separated list, e.g. 0,1.")
-        try:
-            stage = int(item)
-        except ValueError as exc:
-            raise argparse.ArgumentTypeError(
-                "uslgsf_stages values must be integers in [0, 1, 2, 3]."
-            ) from exc
-        if stage not in {0, 1, 2, 3}:
-            raise argparse.ArgumentTypeError("uslgsf_stages values must be in [0, 1, 2, 3].")
-        if stage not in stages:
-            stages.append(stage)
-
-    if not stages:
-        raise argparse.ArgumentTypeError("uslgsf_stages must include at least one stage.")
-    return tuple(stages)
-
-
 def parse_fbdm_stages(value):
     if isinstance(value, (tuple, list)):
         items = value
@@ -166,27 +138,6 @@ def parse_fbdm_stages(value):
     if normalized not in {(0,), (1,), (0, 1)}:
         raise argparse.ArgumentTypeError("fbdm_stages must be one of: 0, 1, or 0,1.")
     return normalized
-
-
-def parse_uslgsf_smooth_kernels(value):
-    if isinstance(value, (tuple, list)):
-        kernels = tuple(int(kernel) for kernel in value)
-    else:
-        try:
-            kernels = tuple(int(item.strip()) for item in str(value).split(","))
-        except ValueError as exc:
-            raise argparse.ArgumentTypeError(
-                "uslgsf_smooth_kernels must contain two odd integers, e.g. 3,7."
-            ) from exc
-    if len(kernels) != 2 or any(kernel <= 0 or kernel % 2 == 0 for kernel in kernels):
-        raise argparse.ArgumentTypeError(
-            "uslgsf_smooth_kernels must contain two positive odd integers."
-        )
-    if kernels[0] >= kernels[1]:
-        raise argparse.ArgumentTypeError(
-            "uslgsf_smooth_kernels must be ordered from small to large."
-        )
-    return kernels
 
 
 def apply_best0616_presets(args):
@@ -311,37 +262,6 @@ def build_model(args, parser):
         model = cmunext_fbdm_best0616(
             num_classes=args.num_classes,
             fbdm_stages=args.fbdm_stages,
-        )
-    elif args.model == "CMUNeXt_USLGSF":
-        model = cmunext_uslgsf(
-            num_classes=args.num_classes,
-            uslgsf_stages=args.uslgsf_stages,
-            uslgsf_smooth_kernels=args.uslgsf_smooth_kernels,
-            uslgsf_context_downsample=args.uslgsf_context_downsample,
-            uslgsf_alpha_init=args.uslgsf_alpha_init,
-            uslgsf_alpha_max=args.uslgsf_alpha_max,
-            uslgsf_mode=args.uslgsf_mode,
-        )
-    elif args.model == "CMUNeXt_USLGSF_V2":
-        model = cmunext_uslgsf_v2(
-            num_classes=args.num_classes,
-            uslgsf_stages=args.uslgsf_stages,
-            uslgsf_smooth_kernels=args.uslgsf_smooth_kernels,
-            uslgsf_context_downsample=args.uslgsf_context_downsample,
-            uslgsf_alpha_init=args.uslgsf_alpha_init,
-            uslgsf_alpha_max=args.uslgsf_alpha_max,
-            uslgsf_mode=args.uslgsf_mode,
-        )
-    elif args.model == "CMUNeXt_USLGSF_V3":
-        model = cmunext_uslgsf_v3(
-            num_classes=args.num_classes,
-            uslgsf_stages=args.uslgsf_stages,
-            uslgsf_smooth_kernels=args.uslgsf_smooth_kernels,
-            uslgsf_context_downsample=args.uslgsf_context_downsample,
-            uslgsf_alpha_init=args.uslgsf_alpha_init,
-            uslgsf_alpha_max=args.uslgsf_alpha_max,
-            uslgsf_mode=args.uslgsf_mode,
-            uslgsf_residual_init_scale=args.uslgsf_residual_init_scale,
         )
     elif args.model == "CMUNeXt_HSPM":
         model = cmunext_hspm(
@@ -849,7 +769,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Validation script for medical image segmentation")
 
     model_choices = [
-        "CMUNet", "CMUNeXt", "CMUNeXt_BARM", HSPM_BARM_MODEL, HSPM_BARM_HFBYPASS_MODEL, "CMUNeXt_FBDM", FBDM_BEST0616_MODEL, "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", HSPM_BEST0616_MODEL, HSPM_BEST0619_MODEL, "CMUNeXt_HSPM_FBDM", HSPM_FBDM_BEST0616_MODEL, HSPM_FBDM_0619_MODEL, "CMUNeXt_HSPM_FBDM_V2",
+        "CMUNet", "CMUNeXt", "CMUNeXt_BARM", HSPM_BARM_MODEL, HSPM_BARM_HFBYPASS_MODEL, "CMUNeXt_FBDM", FBDM_BEST0616_MODEL, "CMUNeXt_HSPM", HSPM_BEST0616_MODEL, HSPM_BEST0619_MODEL, "CMUNeXt_HSPM_FBDM", HSPM_FBDM_BEST0616_MODEL, HSPM_FBDM_0619_MODEL, "CMUNeXt_HSPM_FBDM_V2",
         "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
         "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
         "CMUNeXt_BA_DualGAG_SpeckleEnhance",
@@ -878,21 +798,6 @@ if __name__ == "__main__":
                         help="Use DDSR only for decoder skips or propagate it through the encoder")
     parser.add_argument("--ddsr_aux_init", type=float, default=0.1,
                         help="Initial DDSR auxiliary residual blend")
-    parser.add_argument("--uslgsf_stages", type=parse_uslgsf_stages, default=(0, 1),
-                        help="Comma-separated US-LGSF skip stages, e.g. 0,1 or 0,1,2")
-    parser.add_argument("--uslgsf_smooth_kernels", type=parse_uslgsf_smooth_kernels, default=(3, 7),
-                        help="Small and large odd smoothing kernels for US-LGSF")
-    parser.add_argument("--uslgsf_context_downsample", type=int, default=2,
-                        help="Downsampling factor for the US-LGSF low-frequency context path")
-    parser.add_argument("--uslgsf_alpha_init", type=float, default=0.05,
-                        help="Initial effective US-LGSF residual blend")
-    parser.add_argument("--uslgsf_alpha_max", type=float, default=0.5,
-                        help="Maximum effective US-LGSF residual blend")
-    parser.add_argument("--uslgsf_mode", type=str, default="full",
-                        choices=["full", "context_only", "structure_only", "relevance_only"],
-                        help="US-LGSF full model or a core ablation mode")
-    parser.add_argument("--uslgsf_residual_init_scale", type=float, default=0.05,
-                        help="Residual projection initialization scale for CMUNeXt_USLGSF_V3")
     parser.add_argument("--gag_stages", type=parse_gag_stages, default=(2, 3),
                         help="Comma-separated DualGAG stages, e.g. 0,1 or 1,3 or 0,1,2,3")
     parser.add_argument("--boundary_loss_weight", type=float, default=0.3,
