@@ -108,6 +108,23 @@ class CMUNeXtHSPMBARMTests(unittest.TestCase):
         self.assertEqual(correction.shape, (1, 1, 32, 32))
         self.assertIsNotNone(barm.last_diagnostics)
 
+    def test_hf_energy_backward_is_finite_for_flat_hf_source(self):
+        barm = BoundaryAwareRefinement(
+            channels=SMALL_DIMS[0],
+            gate_init=0.05,
+            gate_max=0.5,
+        ).train()
+        feature = torch.randn(2, SMALL_DIMS[0], 32, 32)
+        hf_feature = torch.zeros(2, SMALL_DIMS[0], 32, 32)
+        seg_logits = torch.randn(2, 1, 32, 32)
+
+        refined, edge, _, _ = barm(feature, seg_logits, hf_feature=hf_feature)
+        loss = refined.square().mean() + edge.square().mean()
+        loss.backward()
+
+        self.assertIsNotNone(barm.hf_atten.grad)
+        self.assertTrue(torch.isfinite(barm.hf_atten.grad).all())
+
     def test_loss_backward_reaches_hspm_and_barm_heads(self):
         torch.manual_seed(0)
         model = _small_model().train()

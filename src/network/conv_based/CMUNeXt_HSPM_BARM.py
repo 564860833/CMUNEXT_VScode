@@ -348,13 +348,15 @@ class BoundaryAwareRefinement(nn.Module):
         _, lh, hl, hh = self.dwt(x)
         keep = torch.sigmoid(self.hf_atten)
         high_frequency = torch.cat((lh * keep[0], hl * keep[1], hh * keep[2]), dim=1)
-        energy = high_frequency.pow(2).mean(dim=1, keepdim=True).sqrt()
+        energy = torch.sqrt(high_frequency.pow(2).mean(dim=1, keepdim=True) + self.eps)
+        energy = torch.clamp_min(energy - self.eps ** 0.5, 0.0)
         energy = F.interpolate(
             energy,
             size=x.shape[-2:],
             mode="bilinear",
             align_corners=False,
         )
+        energy = torch.nan_to_num(energy, nan=0.0, posinf=0.0, neginf=0.0)
         return energy / energy.amax(dim=(2, 3), keepdim=True).clamp_min(self.eps)
 
     def forward(self, feature, seg_logits, uncertainty=None, hf_feature=None):

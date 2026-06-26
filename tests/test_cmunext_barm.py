@@ -10,7 +10,7 @@ with mock.patch.object(sys, "argv", ["main.py"]):
     import main as training_main
 import infer as inference_main
 
-from src.network.conv_based.CMUNeXt_BARM import cmunext_barm
+from src.network.conv_based.CMUNeXt_BARM import BoundaryAwareRefinement, cmunext_barm
 from src.utils.losses import CMUNeXtBARMLoss
 
 
@@ -79,6 +79,22 @@ class CMUNeXtBARMTests(unittest.TestCase):
         self.assertTrue(_has_nonzero_grad(model.Conv_1x1.weight))
         self.assertTrue(_has_nonzero_grad(model.barm.delta_head.weight))
         self.assertTrue(_has_nonzero_grad(model.barm.edge_head.weight))
+
+    def test_hf_energy_backward_is_finite_for_flat_feature(self):
+        barm = BoundaryAwareRefinement(
+            channels=SMALL_DIMS[0],
+            gate_init=0.02,
+            gate_max=0.2,
+        ).train()
+        feature = torch.zeros(2, SMALL_DIMS[0], 32, 32)
+        seg_logits = torch.randn(2, 1, 32, 32)
+
+        refined, edge, _, _ = barm(feature, seg_logits)
+        loss = refined.square().mean() + edge.square().mean()
+        loss.backward()
+
+        self.assertIsNotNone(barm.hf_atten.grad)
+        self.assertTrue(torch.isfinite(barm.hf_atten.grad).all())
 
     def test_training_and_inference_entrypoints_register_barm(self):
         self.assertIn("CMUNeXt_BARM", training_main.BARM_MODELS)
