@@ -10,7 +10,11 @@ with mock.patch.object(sys, "argv", ["main.py"]):
     import main as training_main
 import infer as inference_main
 
-from src.network.conv_based.CMUNeXt_HSPM_BARM import cmunext_hspm_barm
+from src.network.conv_based.CMUNeXt_HSPM_BARM import (
+    BoundaryAwareRefinement,
+    cmunext_hspm_barm,
+    cmunext_hspm_barm_hfbypass,
+)
 from src.utils.losses import HSPMBARMLoss
 
 
@@ -25,6 +29,19 @@ def _has_nonzero_grad(parameter):
 
 def _small_model():
     return cmunext_hspm_barm(
+        dims=SMALL_DIMS,
+        depths=SMALL_DEPTHS,
+        kernels=SMALL_KERNELS,
+        hspm_mixer_mode="bounded",
+        hspm_gamma_max=0.35,
+        hspm_backbone_mode="dual_path",
+        barm_gate_init=0.05,
+        barm_gate_max=0.5,
+    )
+
+
+def _small_hfbypass_model():
+    return cmunext_hspm_barm_hfbypass(
         dims=SMALL_DIMS,
         depths=SMALL_DEPTHS,
         kernels=SMALL_KERNELS,
@@ -55,6 +72,41 @@ class CMUNeXtHSPMBARMTests(unittest.TestCase):
         self.assertAlmostEqual(model.barm.effective_gamma().item(), 0.025, places=5)
         self.assertIsNotNone(model.get_barm_diagnostics())
         self.assertIsNotNone(model.last_fusion_diagnostics)
+
+    def test_hfbypass_output_contract_and_hf_feature_path(self):
+        model = _small_hfbypass_model().eval()
+        self.assertTrue(model.barm_hf_bypass)
+
+        with torch.no_grad():
+            outputs = model(torch.randn(2, 3, 32, 32))
+
+        self.assertEqual(
+            set(outputs),
+            {"seg", "base_seg", "coarse", "uncertainty", "edge", "band", "logit_correction"},
+        )
+        for key in ("seg", "base_seg", "edge", "band", "logit_correction"):
+            self.assertEqual(outputs[key].shape, (2, 1, 32, 32))
+        self.assertIsNotNone(model.get_barm_diagnostics())
+
+        barm = BoundaryAwareRefinement(
+            channels=SMALL_DIMS[0],
+            gate_init=0.05,
+            gate_max=0.5,
+        ).eval()
+        feature = torch.randn(1, SMALL_DIMS[0], 32, 32)
+        hf_feature = torch.randn(1, SMALL_DIMS[0], 32, 32)
+        seg_logits = torch.randn(1, 1, 32, 32)
+        with torch.no_grad():
+            refined, edge, band, correction = barm(
+                feature,
+                seg_logits,
+                hf_feature=hf_feature,
+            )
+        self.assertEqual(refined.shape, (1, 1, 32, 32))
+        self.assertEqual(edge.shape, (1, 1, 32, 32))
+        self.assertEqual(band.shape, (1, 1, 32, 32))
+        self.assertEqual(correction.shape, (1, 1, 32, 32))
+        self.assertIsNotNone(barm.last_diagnostics)
 
     def test_loss_backward_reaches_hspm_and_barm_heads(self):
         torch.manual_seed(0)
@@ -130,14 +182,15 @@ class CMUNeXtHSPMBARMTests(unittest.TestCase):
         self.assertTrue(base_seg.grad is None or base_seg.grad.detach().abs().sum().item() == 0.0)
 
     def test_training_and_inference_entrypoints_register_hspm_barm(self):
-        self.assertIn("CMUNeXt_HSPM_BARM", training_main.HSPM_BARM_MODELS)
-        self.assertIn("CMUNeXt_HSPM_BARM", training_main.HSPM_MODELS)
-        self.assertIn("CMUNeXt_HSPM_BARM", training_main.BARM_MODELS)
-        self.assertIn("CMUNeXt_HSPM_BARM", inference_main.HSPM_BARM_MODELS)
-        self.assertIn("CMUNeXt_HSPM_BARM", inference_main.BASE_SEG_MODELS)
+        for model_name in ("CMUNeXt_HSPM_BARM", "CMUNeXt_HSPM_BARM_HFBypass"):
+            self.assertIn(model_name, training_main.HSPM_BARM_MODELS)
+            self.assertIn(model_name, training_main.HSPM_MODELS)
+            self.assertIn(model_name, training_main.BARM_MODELS)
+            self.assertIn(model_name, inference_main.HSPM_BARM_MODELS)
+            self.assertIn(model_name, inference_main.BASE_SEG_MODELS)
 
         args = Namespace(
-            model="CMUNeXt_HSPM_BARM",
+            model="CMUNeXt_HSPM_BARM_HFBypass",
             num_classes=1,
             hspm_mode="full",
             hspm_mixer_mode="bounded",
@@ -156,6 +209,7 @@ class CMUNeXtHSPMBARMTests(unittest.TestCase):
             barm_hf_keep_init=0.3,
         )
         model = inference_main.build_model(args, argparse.ArgumentParser()).eval()
+        self.assertTrue(model.barm_hf_bypass)
         with torch.no_grad():
             outputs = model(torch.randn(1, 3, 32, 32))
         self.assertEqual(outputs["seg"].shape, (1, 1, 32, 32))
@@ -164,7 +218,7 @@ class CMUNeXtHSPMBARMTests(unittest.TestCase):
             (1, 1, 32, 32),
         )
 
-        loss_args = Namespace(model="CMUNeXt_HSPM_BARM")
+        loss_args = Namespace(model="CMUNeXt_HSPM_BARM_HFBypass")
         loss_output = training_main.compute_loss(
             loss_args,
             HSPMBARMLoss(),

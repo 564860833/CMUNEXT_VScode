@@ -42,7 +42,7 @@ from src.network.conv_based.CMUNeXt_USLGSF import cmunext_uslgsf
 from src.network.conv_based.CMUNeXt_USLGSF_V2 import cmunext_uslgsf_v2
 from src.network.conv_based.CMUNeXt_USLGSF_V3 import cmunext_uslgsf_v3
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
-from src.network.conv_based.CMUNeXt_HSPM_BARM import cmunext_hspm_barm
+from src.network.conv_based.CMUNeXt_HSPM_BARM import cmunext_hspm_barm, cmunext_hspm_barm_hfbypass
 from src.network.conv_based.CMUNeXt_HSPM_Best0616 import cmunext_hspm_best0616
 from src.network.conv_based.CMUNeXt_HSPM_Best0619 import cmunext_hspm_best0619
 from src.network.conv_based.CMUNeXt_HSPM_FBDM import cmunext_hspm_fbdm, cmunext_hspm_fbdm_v2
@@ -81,7 +81,8 @@ HSPM_BEST0619_MODEL = "CMUNeXt_HSPM_Best0619"
 FBDM_ONLY_MODELS = {"CMUNeXt_FBDM", FBDM_BEST0616_MODEL}
 FBDM_MODELS = {*HSPM_FBDM_MODELS, *FBDM_ONLY_MODELS}
 HSPM_BARM_MODEL = "CMUNeXt_HSPM_BARM"
-HSPM_BARM_MODELS = {HSPM_BARM_MODEL}
+HSPM_BARM_HFBYPASS_MODEL = "CMUNeXt_HSPM_BARM_HFBypass"
+HSPM_BARM_MODELS = {HSPM_BARM_MODEL, HSPM_BARM_HFBYPASS_MODEL}
 HSPM_ONLY_MODELS = {"CMUNeXt_HSPM", HSPM_BEST0616_MODEL, HSPM_BEST0619_MODEL}
 HSPM_MODELS = {*HSPM_ONLY_MODELS, *HSPM_FBDM_MODELS, *HSPM_BARM_MODELS}
 BARM_MODELS = {"CMUNeXt_BARM", *HSPM_BARM_MODELS}
@@ -363,7 +364,7 @@ def apply_best0616_presets(args):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default="CMUNeXt",
-                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_BARM", HSPM_BARM_MODEL, "CMUNeXt_FBDM", FBDM_BEST0616_MODEL, "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", HSPM_BEST0616_MODEL, HSPM_BEST0619_MODEL, "CMUNeXt_HSPM_FBDM", HSPM_FBDM_BEST0616_MODEL, HSPM_FBDM_0619_MODEL, "CMUNeXt_HSPM_FBDM_V2",
+                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_BARM", HSPM_BARM_MODEL, HSPM_BARM_HFBYPASS_MODEL, "CMUNeXt_FBDM", FBDM_BEST0616_MODEL, "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", HSPM_BEST0616_MODEL, HSPM_BEST0619_MODEL, "CMUNeXt_HSPM_FBDM", HSPM_FBDM_BEST0616_MODEL, HSPM_FBDM_0619_MODEL, "CMUNeXt_HSPM_FBDM_V2",
                              "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
                              "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
                              "CMUNeXt_BA_DualGAG_SpeckleEnhance",
@@ -592,8 +593,13 @@ def get_model(args):
             barm_gate_max=args.barm_gate_max,
             barm_hf_keep_init=args.barm_hf_keep_init,
         ).cuda()
-    elif args.model == HSPM_BARM_MODEL:
-        model = cmunext_hspm_barm(
+    elif args.model in HSPM_BARM_MODELS:
+        hspm_barm_factory = (
+            cmunext_hspm_barm_hfbypass
+            if args.model == HSPM_BARM_HFBYPASS_MODEL
+            else cmunext_hspm_barm
+        )
+        model = hspm_barm_factory(
             num_classes=args.num_classes,
             hspm_mode=args.hspm_mode,
             hspm_mixer_mode=args.hspm_mixer_mode,

@@ -357,7 +357,7 @@ class BoundaryAwareRefinement(nn.Module):
         )
         return energy / energy.amax(dim=(2, 3), keepdim=True).clamp_min(self.eps)
 
-    def forward(self, feature, seg_logits, uncertainty=None):
+    def forward(self, feature, seg_logits, uncertainty=None, hf_feature=None):
         seg_prob = torch.sigmoid(seg_logits.detach())
         band = self.sobel(seg_prob)
         if uncertainty is not None:
@@ -369,7 +369,22 @@ class BoundaryAwareRefinement(nn.Module):
             )
             band = (0.5 * band + 0.5 * uncertainty).clamp(0.0, 1.0)
 
-        high_frequency = self.denoised_hf_energy(feature)
+        hf_source = feature if hf_feature is None else hf_feature.detach()
+        if hf_source.shape[-2:] != feature.shape[-2:]:
+            hf_source = F.interpolate(
+                hf_source,
+                size=feature.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+        high_frequency = self.denoised_hf_energy(hf_source)
+        if high_frequency.shape[-2:] != feature.shape[-2:]:
+            high_frequency = F.interpolate(
+                high_frequency,
+                size=feature.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
         boundary_feature = self.boundary_conv(torch.cat((feature, high_frequency, band), dim=1))
         raw_delta = self.delta_head(boundary_feature)
         logit_correction = self.effective_gamma() * band.detach() * torch.tanh(raw_delta)
@@ -414,6 +429,7 @@ class CMUNeXt_HSPM_BARM(nn.Module):
         barm_gate_init=0.05,
         barm_gate_max=0.5,
         barm_hf_keep_init=0.3,
+        barm_hf_bypass=False,
     ):
         super().__init__()
         if num_classes != 1:
@@ -437,6 +453,7 @@ class CMUNeXt_HSPM_BARM(nn.Module):
         self.hspm_fusion_mode = hspm_fusion_mode
         self.hspm_small_area_threshold = float(hspm_small_area_threshold)
         self.hspm_small_area_temperature = float(hspm_small_area_temperature)
+        self.barm_hf_bypass = bool(barm_hf_bypass)
         self.last_fusion_diagnostics = None
         self.Maxpool = nn.MaxPool2d(kernel_size=2, stride=2)
 
@@ -599,6 +616,7 @@ class CMUNeXt_HSPM_BARM(nn.Module):
             d2,
             base_seg,
             uncertainty=uncertainty,
+            hf_feature=x1 if self.barm_hf_bypass else None,
         )
         return {
             "seg": seg,
@@ -632,6 +650,7 @@ def cmunext_hspm_barm(
     barm_gate_init=0.05,
     barm_gate_max=0.5,
     barm_hf_keep_init=0.3,
+    barm_hf_bypass=False,
 ):
     return CMUNeXt_HSPM_BARM(
         input_channel=input_channel,
@@ -654,4 +673,10 @@ def cmunext_hspm_barm(
         barm_gate_init=barm_gate_init,
         barm_gate_max=barm_gate_max,
         barm_hf_keep_init=barm_hf_keep_init,
+        barm_hf_bypass=barm_hf_bypass,
     )
+
+
+def cmunext_hspm_barm_hfbypass(**kwargs):
+    kwargs["barm_hf_bypass"] = True
+    return cmunext_hspm_barm(**kwargs)
