@@ -35,6 +35,7 @@ from src.network.conv_based.UNeXt import UNext
 from src.network.conv_based.UNetplus import ResNet34UnetPlus
 from src.network.conv_based.UNet3plus import UNet3plus
 from src.network.conv_based.CMUNeXt import cmunext
+from src.network.conv_based.CMUNeXt_BARM import cmunext_barm
 from src.network.conv_based.CMUNeXt_FBDM import cmunext_fbdm
 from src.network.conv_based.CMUNeXt_FBDM_Best0616 import cmunext_fbdm_best0616
 from src.network.conv_based.CMUNeXt_USLGSF import cmunext_uslgsf
@@ -80,6 +81,15 @@ FBDM_ONLY_MODELS = {"CMUNeXt_FBDM", FBDM_BEST0616_MODEL}
 FBDM_MODELS = {*HSPM_FBDM_MODELS, *FBDM_ONLY_MODELS}
 HSPM_ONLY_MODELS = {"CMUNeXt_HSPM", HSPM_BEST0616_MODEL, HSPM_BEST0619_MODEL}
 HSPM_MODELS = {*HSPM_ONLY_MODELS, *HSPM_FBDM_MODELS}
+BARM_MODELS = {"CMUNeXt_BARM"}
+BARM_DIAGNOSTIC_NAMES = (
+    "effective_gamma",
+    "band_mean",
+    "hf_energy_mean",
+    "logit_correction_abs_mean",
+    "logit_correction_abs_max",
+    "prediction_flip_ratio",
+)
 USLGSF_V3_MODELS = {"CMUNeXt_USLGSF_V3"}
 USLGSF_V3_DIAGNOSTIC_NAMES = (
     "structure_reliability_mean",
@@ -349,7 +359,7 @@ def apply_best0616_presets(args):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default="CMUNeXt",
-                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_FBDM", FBDM_BEST0616_MODEL, "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", HSPM_BEST0616_MODEL, HSPM_BEST0619_MODEL, "CMUNeXt_HSPM_FBDM", HSPM_FBDM_BEST0616_MODEL, HSPM_FBDM_0619_MODEL, "CMUNeXt_HSPM_FBDM_V2",
+                    choices=["Mobile_U_ViT", "CMUNeXt", "CMUNeXt_BARM", "CMUNeXt_FBDM", FBDM_BEST0616_MODEL, "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", HSPM_BEST0616_MODEL, HSPM_BEST0619_MODEL, "CMUNeXt_HSPM_FBDM", HSPM_FBDM_BEST0616_MODEL, HSPM_FBDM_0619_MODEL, "CMUNeXt_HSPM_FBDM_V2",
                              "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
                              "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
                              "CMUNeXt_BA_DualGAG_SpeckleEnhance",
@@ -409,6 +419,24 @@ parser.add_argument('--gag_stages', type=parse_gag_stages, default=(2, 3),
                     help='Comma-separated DualGAG stages, e.g. 0,1 or 1,3 or 0,1,2,3')
 parser.add_argument('--boundary_loss_weight', type=float, default=0.3,
                     help='Boundary loss weight for CMUNeXt_BA_DualGAG')
+parser.add_argument('--barm_gate_init', type=float, default=0.02,
+                    help='Initial effective BARM boundary-refinement strength')
+parser.add_argument('--barm_gate_max', type=float, default=0.2,
+                    help='Maximum effective BARM boundary-refinement strength')
+parser.add_argument('--barm_hf_keep_init', type=float, default=0.3,
+                    help='Initial high-frequency keep ratio for BARM wavelet energy')
+parser.add_argument('--barm_warmup_epochs', type=int, default=60,
+                    help='Epochs used to linearly warm up BARM logit refinement')
+parser.add_argument('--barm_coarse_loss_weight', type=float, default=0.3,
+                    help='Auxiliary pre-refinement segmentation loss weight for CMUNeXt_BARM')
+parser.add_argument('--barm_boundary_loss_weight', type=float, default=0.2,
+                    help='Boundary-band Dice loss weight for CMUNeXt_BARM')
+parser.add_argument('--barm_edge_loss_weight', type=float, default=0.1,
+                    help='Boundary-band edge supervision loss weight for CMUNeXt_BARM')
+parser.add_argument('--barm_edge_band_width', type=int, default=2,
+                    help='GT boundary band half-width for CMUNeXt_BARM edge supervision')
+parser.add_argument('--barm_edge_pos_weight', type=float, default=10.0,
+                    help='Positive-class weight for CMUNeXt_BARM edge BCE')
 parser.add_argument('--hspm_mode', type=str, default="full", choices=["full", "context_only"],
                     help='Enable the full HSPM or keep only its high-resolution context bottleneck')
 parser.add_argument('--hspm_coarse_loss_weight', type=float, default=0.3,
@@ -537,6 +565,13 @@ def get_model(args):
         model = MK_UNet(num_classes=args.num_classes, in_channels=3).cuda()
     elif args.model == "CMUNeXt":
         model = cmunext(num_classes=args.num_classes).cuda()
+    elif args.model == "CMUNeXt_BARM":
+        model = cmunext_barm(
+            num_classes=args.num_classes,
+            barm_gate_init=args.barm_gate_init,
+            barm_gate_max=args.barm_gate_max,
+            barm_hf_keep_init=args.barm_hf_keep_init,
+        ).cuda()
     elif args.model == "CMUNeXt_FBDM":
         model = cmunext_fbdm(
             num_classes=args.num_classes,
@@ -719,6 +754,14 @@ def get_model(args):
 
 
 def get_criterion(args):
+    if args.model in BARM_MODELS:
+        return losses.__dict__['CMUNeXtBARMLoss'](
+            coarse_weight=args.barm_coarse_loss_weight,
+            boundary_weight=args.barm_boundary_loss_weight,
+            edge_weight=args.barm_edge_loss_weight,
+            edge_band_width=args.barm_edge_band_width,
+            edge_pos_weight=args.barm_edge_pos_weight,
+        ).cuda()
     if args.model in HSPM_FBDM_MODELS:
         return losses.__dict__['HSPMFBDMLoss'](
             coarse_weight=args.hspm_coarse_loss_weight,
@@ -813,6 +856,8 @@ def compute_loss(
     refine_weight=None,
     preserve_weight=None,
 ):
+    if args.model in BARM_MODELS:
+        return criterion(outputs, label_batch, return_components=True)
     if args.model in HSPM_FBDM_MODELS:
         return criterion(
             outputs,
@@ -938,9 +983,39 @@ def configure_fbdm_epoch(args, model, epoch_num):
     return edge_weight, residual_scale, effective_gamma
 
 
+def get_barm_residual_scale(args, epoch_num):
+    if args.model not in BARM_MODELS:
+        return 1.0
+    warmup_epochs = int(args.barm_warmup_epochs)
+    if warmup_epochs <= 0:
+        return 1.0
+    return min(max(float(epoch_num) / warmup_epochs, 0.0), 1.0)
+
+
+def configure_barm_epoch(args, model, epoch_num):
+    residual_scale = get_barm_residual_scale(args, epoch_num)
+    effective_gamma = None
+    if args.model in BARM_MODELS:
+        barm_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+        barm_model.set_warmup_scale(residual_scale)
+        effective_gamma = float(barm_model.barm.effective_gamma().detach().cpu())
+    return residual_scale, effective_gamma
+
+
 def get_hspm_fusion_diagnostics(model):
     hspm_model = model.module if isinstance(model, torch.nn.DataParallel) else model
     diagnostics = getattr(hspm_model, "last_fusion_diagnostics", None)
+    if diagnostics is None:
+        return None
+    return {
+        name: float(value.detach().cpu())
+        for name, value in diagnostics.items()
+    }
+
+
+def get_barm_diagnostics(model):
+    barm_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+    diagnostics = barm_model.get_barm_diagnostics()
     if diagnostics is None:
         return None
     return {
@@ -996,6 +1071,14 @@ def update_fbdm_edge_diagnostic_meters(avg_meters, criterion, prefix, batch_size
         return
     for name, value in diagnostics.items():
         avg_meters[f"{prefix}_fbdm_{name}"].update(value, batch_size)
+
+
+def update_barm_diagnostic_meters(avg_meters, model, prefix, batch_size):
+    diagnostics = get_barm_diagnostics(model)
+    if diagnostics is None:
+        return
+    for name, value in diagnostics.items():
+        avg_meters[f"{prefix}_barm_{name}"].update(value, batch_size)
 
 
 def validate_sampling_args(args):
@@ -1260,6 +1343,22 @@ def main(args):
     )
     if boundary_band_enabled and args.model not in HSPM_FBDM_CORRECTION_MODELS:
         raise ValueError("FBDM boundary-band loss requires a logit-correction model.")
+    if not 0.0 < args.barm_gate_init < args.barm_gate_max:
+        raise ValueError("barm_gate_init must be in (0, barm_gate_max).")
+    if not 0.0 < args.barm_hf_keep_init < 1.0:
+        raise ValueError("barm_hf_keep_init must be in (0, 1).")
+    if args.barm_warmup_epochs < 0:
+        raise ValueError("barm_warmup_epochs must be non-negative.")
+    if (
+        args.barm_coarse_loss_weight < 0
+        or args.barm_boundary_loss_weight < 0
+        or args.barm_edge_loss_weight < 0
+    ):
+        raise ValueError("BARM loss weights must be non-negative.")
+    if args.barm_edge_band_width < 1:
+        raise ValueError("barm_edge_band_width must be positive.")
+    if args.barm_edge_pos_weight <= 0:
+        raise ValueError("barm_edge_pos_weight must be positive.")
     if args.early_stop_patience < 0 or args.early_stop_min_delta < 0:
         raise ValueError("Early stopping settings must be non-negative.")
 
@@ -1337,6 +1436,7 @@ def main(args):
             model,
             epoch_num,
         )
+        barm_residual_scale, barm_effective_gamma = configure_barm_epoch(args, model, epoch_num)
         current_fbdm_boundary_band_weight = (
             get_fbdm_boundary_band_weight(args, epoch_num)
             if args.model in HSPM_FBDM_CORRECTION_MODELS
@@ -1392,6 +1492,13 @@ def main(args):
             if args.model in HSPM_FBDM_CORRECTION_MODELS:
                 for diagnostic_name in FBDM_V2_DIAGNOSTIC_NAMES:
                     avg_meters[f"fbdm_v2_{diagnostic_name}"] = AverageMeter()
+        if args.model in BARM_MODELS:
+            component_names = ["seg", "coarse_weighted", "boundary_weighted", "edge_weighted", "total"]
+            for prefix in ("train", "val"):
+                for component_name in component_names:
+                    avg_meters[f"{prefix}_loss_{component_name}"] = AverageMeter()
+                for diagnostic_name in BARM_DIAGNOSTIC_NAMES:
+                    avg_meters[f"{prefix}_barm_{diagnostic_name}"] = AverageMeter()
         if args.model in USLGSF_V3_MODELS:
             for stage in args.uslgsf_stages:
                 for diagnostic_name in USLGSF_V3_DIAGNOSTIC_NAMES:
@@ -1429,6 +1536,13 @@ def main(args):
                 update_fbdm_edge_diagnostic_meters(
                     avg_meters,
                     criterion,
+                    "train",
+                    img_batch.size(0),
+                )
+            if args.model in BARM_MODELS:
+                update_barm_diagnostic_meters(
+                    avg_meters,
+                    model,
                     "train",
                     img_batch.size(0),
                 )
@@ -1537,6 +1651,13 @@ def main(args):
                     update_fbdm_edge_diagnostic_meters(
                         avg_meters,
                         criterion,
+                        "val",
+                        img_batch.size(0),
+                    )
+                if args.model in BARM_MODELS:
+                    update_barm_diagnostic_meters(
+                        avg_meters,
+                        model,
                         "val",
                         img_batch.size(0),
                     )
@@ -1807,6 +1928,42 @@ def main(args):
                     avg_meters["val_base_HD95"].avg,
                     avg_meters["val_base_ASSD"].avg,
                 )
+        if args.model in BARM_MODELS:
+            logging.info(
+                "BARM schedule: residual_scale=%.4f - effective_gamma=%.4f",
+                barm_residual_scale,
+                barm_effective_gamma,
+            )
+            logging.info(
+                "BARM loss components: train(seg=%.6f - coarse=%.6f - boundary=%.6f"
+                " - edge=%.6f - total=%.6f) - val(seg=%.6f - coarse=%.6f"
+                " - boundary=%.6f - edge=%.6f - total=%.6f)",
+                avg_meters["train_loss_seg"].avg,
+                avg_meters["train_loss_coarse_weighted"].avg,
+                avg_meters["train_loss_boundary_weighted"].avg,
+                avg_meters["train_loss_edge_weighted"].avg,
+                avg_meters["train_loss_total"].avg,
+                avg_meters["val_loss_seg"].avg,
+                avg_meters["val_loss_coarse_weighted"].avg,
+                avg_meters["val_loss_boundary_weighted"].avg,
+                avg_meters["val_loss_edge_weighted"].avg,
+                avg_meters["val_loss_total"].avg,
+            )
+            logging.info(
+                "BARM diagnostics: train(band=%.6f - hf=%.6f - correction_mean=%.6f"
+                " - correction_max=%.6f - flip=%.6f) - val(band=%.6f - hf=%.6f"
+                " - correction_mean=%.6f - correction_max=%.6f - flip=%.6f)",
+                avg_meters["train_barm_band_mean"].avg,
+                avg_meters["train_barm_hf_energy_mean"].avg,
+                avg_meters["train_barm_logit_correction_abs_mean"].avg,
+                avg_meters["train_barm_logit_correction_abs_max"].avg,
+                avg_meters["train_barm_prediction_flip_ratio"].avg,
+                avg_meters["val_barm_band_mean"].avg,
+                avg_meters["val_barm_hf_energy_mean"].avg,
+                avg_meters["val_barm_logit_correction_abs_mean"].avg,
+                avg_meters["val_barm_logit_correction_abs_max"].avg,
+                avg_meters["val_barm_prediction_flip_ratio"].avg,
+            )
         if args.model in USLGSF_V3_MODELS:
             for stage in args.uslgsf_stages:
                 logging.info(

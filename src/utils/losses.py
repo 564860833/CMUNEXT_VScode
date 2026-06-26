@@ -9,6 +9,7 @@ __all__ = [
     'SobelBoundaryLoss',
     'BoundaryAwareSegLoss',
     'HSPMLoss',
+    'CMUNeXtBARMLoss',
     'EdgeSupervisionLoss',
     'FBDMLoss',
     'HSPMFBDMLoss',
@@ -143,6 +144,90 @@ def mask_to_edge(mask, kernel_size=3):
     dilation = F.max_pool2d(mask, kernel_size=kernel_size, stride=1, padding=padding)
     erosion = 1.0 - F.max_pool2d(1.0 - mask, kernel_size=kernel_size, stride=1, padding=padding)
     return (dilation - erosion).clamp(0.0, 1.0)
+
+
+def _boundary_region_dice_loss(logits, target, band, smooth=1e-5):
+    probability = torch.sigmoid(logits) * band
+    target = target.to(device=logits.device, dtype=logits.dtype) * band
+    batch_size = target.size(0)
+    probability = probability.reshape(batch_size, -1)
+    target = target.reshape(batch_size, -1)
+    intersection = (probability * target).sum(dim=1)
+    dice = (2.0 * intersection + smooth) / (
+        probability.sum(dim=1) + target.sum(dim=1) + smooth
+    )
+    return 1.0 - dice.mean()
+
+
+class CMUNeXtBARMLoss(nn.Module):
+    def __init__(
+        self,
+        coarse_weight=0.3,
+        boundary_weight=0.2,
+        edge_weight=0.1,
+        edge_band_width=2,
+        edge_pos_weight=10.0,
+    ):
+        super().__init__()
+        if min(coarse_weight, boundary_weight, edge_weight) < 0:
+            raise ValueError("BARM loss weights must be non-negative.")
+        if edge_band_width < 1:
+            raise ValueError("edge_band_width must be positive.")
+        if edge_pos_weight <= 0:
+            raise ValueError("edge_pos_weight must be positive.")
+        self.coarse_weight = float(coarse_weight)
+        self.boundary_weight = float(boundary_weight)
+        self.edge_weight = float(edge_weight)
+        self.edge_kernel_size = int(2 * edge_band_width + 1)
+        self.seg_loss = BCEDiceLoss()
+        self.register_buffer("edge_pos_weight", torch.tensor([float(edge_pos_weight)]))
+
+    def forward(self, outputs, target, return_components=False):
+        if not isinstance(outputs, dict):
+            raise TypeError("CMUNeXtBARMLoss expects model outputs to be a dictionary.")
+        required_keys = {"seg", "seg_coarse", "edge"}
+        missing_keys = required_keys.difference(outputs)
+        if missing_keys:
+            raise KeyError(
+                "CMUNeXtBARMLoss requires output keys: "
+                f"{sorted(required_keys)}."
+            )
+
+        target = target.to(device=outputs["seg"].device, dtype=outputs["seg"].dtype)
+        seg = self.seg_loss(outputs["seg"], target)
+        coarse = self.seg_loss(outputs["seg_coarse"], target)
+        band = mask_to_edge(target, kernel_size=self.edge_kernel_size).detach()
+        if band.shape[-2:] != outputs["seg"].shape[-2:]:
+            band = F.interpolate(band, size=outputs["seg"].shape[-2:], mode="nearest")
+        boundary = _boundary_region_dice_loss(outputs["seg"], target, band)
+
+        edge_target = band
+        if edge_target.shape[-2:] != outputs["edge"].shape[-2:]:
+            edge_target = F.interpolate(
+                edge_target,
+                size=outputs["edge"].shape[-2:],
+                mode="nearest",
+            )
+        edge_target = edge_target.to(device=outputs["edge"].device, dtype=outputs["edge"].dtype)
+        edge = F.binary_cross_entropy_with_logits(
+            outputs["edge"],
+            edge_target,
+            pos_weight=self.edge_pos_weight.to(dtype=outputs["edge"].dtype),
+        )
+
+        coarse_weighted = self.coarse_weight * coarse
+        boundary_weighted = self.boundary_weight * boundary
+        edge_weighted = self.edge_weight * edge
+        total = seg + coarse_weighted + boundary_weighted + edge_weighted
+        if not return_components:
+            return total
+        return total, {
+            "seg": seg,
+            "coarse_weighted": coarse_weighted,
+            "boundary_weighted": boundary_weighted,
+            "edge_weighted": edge_weighted,
+            "total": total,
+        }
 
 
 class EdgeSupervisionLoss(nn.Module):
