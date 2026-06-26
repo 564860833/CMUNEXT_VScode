@@ -240,19 +240,29 @@ class HSPMBARMLoss(nn.Module):
         edge_weight=0.05,
         edge_band_width=2,
         edge_pos_weight=10.0,
+        correction_weight=0.0,
+        correction_band_width=3,
+        correction_margin=0.05,
     ):
         super().__init__()
-        if min(base_weight, coarse_weight, boundary_weight, edge_weight) < 0:
+        if min(base_weight, coarse_weight, boundary_weight, edge_weight, correction_weight) < 0:
             raise ValueError("HSPM-BARM loss weights must be non-negative.")
         if edge_band_width < 1:
             raise ValueError("edge_band_width must be positive.")
         if edge_pos_weight <= 0:
             raise ValueError("edge_pos_weight must be positive.")
+        if correction_band_width < 1:
+            raise ValueError("correction_band_width must be positive.")
+        if correction_margin < 0:
+            raise ValueError("correction_margin must be non-negative.")
         self.base_weight = float(base_weight)
         self.coarse_weight = float(coarse_weight)
         self.boundary_weight = float(boundary_weight)
         self.edge_weight = float(edge_weight)
+        self.correction_weight = float(correction_weight)
+        self.correction_margin = float(correction_margin)
         self.edge_kernel_size = int(2 * edge_band_width + 1)
+        self.correction_kernel_size = int(2 * correction_band_width + 1)
         self.seg_loss = BCEDiceLoss()
         self.register_buffer("edge_pos_weight", torch.tensor([float(edge_pos_weight)]))
 
@@ -260,6 +270,8 @@ class HSPMBARMLoss(nn.Module):
         if not isinstance(outputs, dict):
             raise TypeError("HSPMBARMLoss expects model outputs to be a dictionary.")
         required_keys = {"seg", "base_seg", "coarse", "edge"}
+        if self.correction_weight > 0:
+            required_keys.add("logit_correction")
         missing_keys = required_keys.difference(outputs)
         if missing_keys:
             raise KeyError(
@@ -294,22 +306,71 @@ class HSPMBARMLoss(nn.Module):
             edge_target,
             pos_weight=self.edge_pos_weight.to(dtype=outputs["edge"].dtype),
         )
+        correction = outputs["seg"].new_zeros(())
+        if self.correction_weight > 0:
+            correction_logits = outputs["logit_correction"]
+            correction_target = target
+            if correction_target.shape[-2:] != correction_logits.shape[-2:]:
+                correction_target = F.interpolate(
+                    correction_target,
+                    size=correction_logits.shape[-2:],
+                    mode="nearest",
+                )
+            correction_target = correction_target.to(
+                device=correction_logits.device,
+                dtype=correction_logits.dtype,
+            )
+            target_binary = (correction_target > 0.5).to(dtype=correction_logits.dtype)
+
+            base_prob = torch.sigmoid(outputs["base_seg"].detach())
+            if base_prob.shape[-2:] != correction_logits.shape[-2:]:
+                base_prob = F.interpolate(
+                    base_prob,
+                    size=correction_logits.shape[-2:],
+                    mode="nearest",
+                )
+            base_wrong = ((base_prob > 0.5) != (target_binary > 0.5)).to(
+                dtype=correction_logits.dtype
+            )
+            correction_band = mask_to_edge(
+                correction_target,
+                kernel_size=self.correction_kernel_size,
+            ).detach()
+            active_mask = correction_band * base_wrong
+            active_count = active_mask.sum()
+            if active_count.detach().item() > 0:
+                direction = target_binary * 2.0 - 1.0
+                hinge = F.relu(self.correction_margin - direction * correction_logits)
+                correction = (hinge * active_mask).sum() / active_count.clamp_min(1.0)
+            else:
+                correction = correction_logits.sum() * 0.0
 
         base_weighted = self.base_weight * base
         coarse_weighted = current_coarse_weight * coarse
         boundary_weighted = self.boundary_weight * boundary
         edge_weighted = self.edge_weight * edge
-        total = seg + base_weighted + coarse_weighted + boundary_weighted + edge_weighted
+        correction_weighted = self.correction_weight * correction
+        total = (
+            seg
+            + base_weighted
+            + coarse_weighted
+            + boundary_weighted
+            + edge_weighted
+            + correction_weighted
+        )
         if not return_components:
             return total
-        return total, {
+        components = {
             "seg": seg,
             "base_weighted": base_weighted,
             "coarse_weighted": coarse_weighted,
             "boundary_weighted": boundary_weighted,
             "edge_weighted": edge_weighted,
-            "total": total,
         }
+        if self.correction_weight > 0:
+            components["correction_weighted"] = correction_weighted
+        components["total"] = total
+        return total, components
 
 
 class EdgeSupervisionLoss(nn.Module):

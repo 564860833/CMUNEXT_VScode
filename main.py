@@ -451,6 +451,12 @@ parser.add_argument('--hspm_barm_edge_band_width', type=int, default=2,
                     help='GT boundary band half-width for CMUNeXt_HSPM_BARM edge supervision')
 parser.add_argument('--hspm_barm_edge_pos_weight', type=float, default=10.0,
                     help='Positive-class weight for CMUNeXt_HSPM_BARM edge BCE')
+parser.add_argument('--hspm_barm_correction_loss_weight', type=float, default=0.0,
+                    help='Residual correction loss weight for CMUNeXt_HSPM_BARM')
+parser.add_argument('--hspm_barm_correction_band_width', type=int, default=3,
+                    help='GT boundary band half-width for CMUNeXt_HSPM_BARM correction loss')
+parser.add_argument('--hspm_barm_correction_margin', type=float, default=0.05,
+                    help='Hinge margin for CMUNeXt_HSPM_BARM residual correction loss')
 parser.add_argument('--hspm_mode', type=str, default="full", choices=["full", "context_only"],
                     help='Enable the full HSPM or keep only its high-resolution context bottleneck')
 parser.add_argument('--hspm_coarse_loss_weight', type=float, default=0.3,
@@ -795,6 +801,9 @@ def get_criterion(args):
             edge_weight=args.hspm_barm_edge_loss_weight,
             edge_band_width=args.hspm_barm_edge_band_width,
             edge_pos_weight=args.hspm_barm_edge_pos_weight,
+            correction_weight=args.hspm_barm_correction_loss_weight,
+            correction_band_width=args.hspm_barm_correction_band_width,
+            correction_margin=args.hspm_barm_correction_margin,
         ).cuda()
     if args.model in BARM_MODELS:
         return losses.__dict__['CMUNeXtBARMLoss'](
@@ -1418,6 +1427,12 @@ def main(args):
         raise ValueError("hspm_barm_edge_band_width must be positive.")
     if args.hspm_barm_edge_pos_weight <= 0:
         raise ValueError("hspm_barm_edge_pos_weight must be positive.")
+    if args.hspm_barm_correction_loss_weight < 0:
+        raise ValueError("hspm_barm_correction_loss_weight must be non-negative.")
+    if args.hspm_barm_correction_band_width < 1:
+        raise ValueError("hspm_barm_correction_band_width must be positive.")
+    if args.hspm_barm_correction_margin < 0:
+        raise ValueError("hspm_barm_correction_margin must be non-negative.")
     if args.early_stop_patience < 0 or args.early_stop_min_delta < 0:
         raise ValueError("Early stopping settings must be non-negative.")
 
@@ -1555,6 +1570,7 @@ def main(args):
             component_names = ["seg", "coarse_weighted", "boundary_weighted", "edge_weighted", "total"]
             if args.model in HSPM_BARM_MODELS:
                 component_names.insert(1, "base_weighted")
+                component_names.insert(-1, "correction_weighted")
             for prefix in ("train", "val"):
                 for component_name in component_names:
                     avg_meters[f"{prefix}_loss_{component_name}"] = AverageMeter()
@@ -1998,20 +2014,23 @@ def main(args):
             if args.model in HSPM_BARM_MODELS:
                 logging.info(
                     "HSPM-BARM loss components: train(seg=%.6f - base=%.6f"
-                    " - coarse=%.6f - boundary=%.6f - edge=%.6f - total=%.6f)"
+                    " - coarse=%.6f - boundary=%.6f - edge=%.6f"
+                    " - correction=%.6f - total=%.6f)"
                     " - val(seg=%.6f - base=%.6f - coarse=%.6f"
-                    " - boundary=%.6f - edge=%.6f - total=%.6f)",
+                    " - boundary=%.6f - edge=%.6f - correction=%.6f - total=%.6f)",
                     avg_meters["train_loss_seg"].avg,
                     avg_meters["train_loss_base_weighted"].avg,
                     avg_meters["train_loss_coarse_weighted"].avg,
                     avg_meters["train_loss_boundary_weighted"].avg,
                     avg_meters["train_loss_edge_weighted"].avg,
+                    avg_meters["train_loss_correction_weighted"].avg,
                     avg_meters["train_loss_total"].avg,
                     avg_meters["val_loss_seg"].avg,
                     avg_meters["val_loss_base_weighted"].avg,
                     avg_meters["val_loss_coarse_weighted"].avg,
                     avg_meters["val_loss_boundary_weighted"].avg,
                     avg_meters["val_loss_edge_weighted"].avg,
+                    avg_meters["val_loss_correction_weighted"].avg,
                     avg_meters["val_loss_total"].avg,
                 )
                 logging.info(

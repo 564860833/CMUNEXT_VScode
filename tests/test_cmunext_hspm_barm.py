@@ -84,6 +84,51 @@ class CMUNeXtHSPMBARMTests(unittest.TestCase):
         self.assertTrue(_has_nonzero_grad(model.barm.delta_head.weight))
         self.assertTrue(_has_nonzero_grad(model.barm.edge_head.weight))
 
+    def test_residual_correction_loss_targets_barm_delta_only(self):
+        torch.manual_seed(0)
+        model = _small_model().train()
+        inputs = torch.randn(2, 3, 32, 32)
+        target = torch.zeros(2, 1, 32, 32)
+        target[:, :, 8:24, 10:22] = 1.0
+
+        outputs = model(inputs)
+        criterion = HSPMBARMLoss(
+            base_weight=0.3,
+            coarse_weight=0.1,
+            boundary_weight=0.1,
+            edge_weight=0.05,
+            correction_weight=0.05,
+            correction_band_width=3,
+            correction_margin=0.05,
+        )
+        total, components = criterion(outputs, target, coarse_weight=0.08, return_components=True)
+        self.assertIn("correction_weighted", components)
+        self.assertGreater(components["correction_weighted"].item(), 0.0)
+        total.backward()
+        self.assertTrue(_has_nonzero_grad(model.barm.delta_head.weight))
+
+        base_seg = torch.zeros(1, 1, 16, 16, requires_grad=True)
+        logit_correction = torch.zeros(1, 1, 16, 16, requires_grad=True)
+        synthetic_target = torch.zeros(1, 1, 16, 16)
+        synthetic_target[:, :, 4:12, 4:12] = 1.0
+        synthetic_outputs = {
+            "seg": base_seg + logit_correction,
+            "base_seg": base_seg,
+            "coarse": torch.zeros(1, 1, 4, 4, requires_grad=True),
+            "edge": torch.zeros(1, 1, 16, 16, requires_grad=True),
+            "logit_correction": logit_correction,
+        }
+        _, synthetic_components = criterion(
+            synthetic_outputs,
+            synthetic_target,
+            coarse_weight=0.08,
+            return_components=True,
+        )
+        synthetic_components["correction_weighted"].backward()
+
+        self.assertTrue(_has_nonzero_grad(logit_correction))
+        self.assertTrue(base_seg.grad is None or base_seg.grad.detach().abs().sum().item() == 0.0)
+
     def test_training_and_inference_entrypoints_register_hspm_barm(self):
         self.assertIn("CMUNeXt_HSPM_BARM", training_main.HSPM_BARM_MODELS)
         self.assertIn("CMUNeXt_HSPM_BARM", training_main.HSPM_MODELS)
