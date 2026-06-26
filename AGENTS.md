@@ -12,7 +12,7 @@
 - Windows 下优先使用：
   `D:\DeepLearning\CMUNeXt\.venv\Scripts\python.exe`
   例如：
-  `D:\DeepLearning\CMUNeXt\.venv\Scripts\python.exe -m pytest tests/test_hspm_fbdm.py -o cache_dir=.codex-scratch/.pytest_cache`
+  `D:\DeepLearning\CMUNeXt\.venv\Scripts\python.exe -m pytest tests/test_best0616_models.py -o cache_dir=.codex-scratch/.pytest_cache`
 - 不要优先使用系统 `python`、全局 conda/base 环境或其他解释器；只有当 `.venv` 不存在、损坏或缺少必要依赖时，才允许回退到其他环境，并必须在回复中说明原因。
 - pytest 缓存、临时测试输出、日志等仍必须放到 `.codex-scratch/`，不要在仓库根目录或源码目录创建无关临时产物。
 - 判断“环境缺少依赖”前，必须先检查 `.venv`，例如：

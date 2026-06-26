@@ -100,37 +100,6 @@ python main.py --model CMUNeXt_HSPM \
   --use_extra_aug
 ```
 
-### Best0616 FBDM edge stages
-
-`CMUNeXt_FBDM_Best0616` keeps the full FBDM branch at `x1` by default. Use
-`--fbdm_stages` to select `x1` (`0`), the lightweight `x2` edge head (`1`),
-or both (`0,1`). In the dual-stage mode, `--fbdm_x2_edge_ratio` sets the x2/x1
-loss ratio while the total scheduled edge-loss weight remains unchanged:
-
-```bash
-python main.py --model CMUNeXt_FBDM_Best0616 \
-  --fbdm_stages 0,1 \
-  --fbdm_x2_edge_ratio 0.30
-```
-
-Use the same `--fbdm_stages` value for training and inference. The default
-`--fbdm_stages 0` remains compatible with existing Best0616 checkpoints.
-
-All FBDM models default to the legacy edge loss. Use balanced BCE-Dice to
-increase the contribution of sparse positive edge pixels:
-
-```bash
-python main.py --model CMUNeXt_FBDM_Best0616 \
-  --fbdm_stages 0,1 \
-  --fbdm_x2_edge_ratio 0.30 \
-  --fbdm_edge_loss_type balanced_bce_dice \
-  --fbdm_edge_pos_weight 20
-```
-
-The alternative `focal_dice` mode accepts `--fbdm_edge_focal_alpha` and
-`--fbdm_edge_focal_gamma`. These options change only the auxiliary edge
-criterion and do not change model checkpoint structure.
-
 ## Inference
 
 ```python

@@ -15,15 +15,10 @@ from src.network.conv_based.AttU_Net import AttU_Net
 from src.network.conv_based.CMUNet import CMUNet
 from src.network.conv_based.CMUNeXt import cmunext
 from src.network.conv_based.CMUNeXt_BARM import cmunext_barm
-from src.network.conv_based.CMUNeXt_FBDM import cmunext_fbdm
-from src.network.conv_based.CMUNeXt_FBDM_Best0616 import cmunext_fbdm_best0616
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
 from src.network.conv_based.CMUNeXt_HSPM_BARM import cmunext_hspm_barm, cmunext_hspm_barm_hfbypass
 from src.network.conv_based.CMUNeXt_HSPM_Best0616 import cmunext_hspm_best0616
 from src.network.conv_based.CMUNeXt_HSPM_Best0619 import cmunext_hspm_best0619
-from src.network.conv_based.CMUNeXt_HSPM_FBDM import cmunext_hspm_fbdm, cmunext_hspm_fbdm_v2
-from src.network.conv_based.CMUNeXt_HSPM_FBDM_Best0616 import cmunext_hspm_fbdm_best0616
-from src.network.conv_based.CMUNeXt_HSPM_FBDM_0619 import cmunext_hspm_fbdm_0619
 from src.network.conv_based.CMUNeXt_BA_DualGAG import cmunext_ba_dualgag
 from src.network.conv_based.CMUNeXt_BA_DualGAG_SpeckleEnhance import cmunext_ba_dualgag_speckleenhance
 from src.network.conv_based.CMUNeXt_DualGAG import cmunext_dualgag
@@ -38,30 +33,15 @@ from src.network.hybrid_based.Mobile_U_ViT import mobileuvit
 from src.network.transfomer_based.transformer_based_network import get_transformer_based_model
 
 
-HSPM_FBDM_V2_MODELS = {"CMUNeXt_HSPM_FBDM_V2"}
-HSPM_FBDM_BEST0616_MODEL = "CMUNeXt_HSPM_FBDM_Best0616"
-HSPM_FBDM_0619_MODEL = "CMUNeXt_HSPM_FBDM_0619"
-HSPM_FBDM_CORRECTION_MODELS = {
-    *HSPM_FBDM_V2_MODELS,
-    HSPM_FBDM_BEST0616_MODEL,
-}
-HSPM_FBDM_MODELS = {
-    "CMUNeXt_HSPM_FBDM",
-    HSPM_FBDM_BEST0616_MODEL,
-    HSPM_FBDM_0619_MODEL,
-    *HSPM_FBDM_V2_MODELS,
-}
-FBDM_BEST0616_MODEL = "CMUNeXt_FBDM_Best0616"
 HSPM_BEST0616_MODEL = "CMUNeXt_HSPM_Best0616"
 HSPM_BEST0619_MODEL = "CMUNeXt_HSPM_Best0619"
-FBDM_ONLY_MODELS = {"CMUNeXt_FBDM", FBDM_BEST0616_MODEL}
 HSPM_BARM_MODEL = "CMUNeXt_HSPM_BARM"
 HSPM_BARM_HFBYPASS_MODEL = "CMUNeXt_HSPM_BARM_HFBypass"
 HSPM_BARM_MODELS = {HSPM_BARM_MODEL, HSPM_BARM_HFBYPASS_MODEL}
 HSPM_ONLY_MODELS = {"CMUNeXt_HSPM", HSPM_BEST0616_MODEL, HSPM_BEST0619_MODEL}
-HSPM_MODELS = {*HSPM_ONLY_MODELS, *HSPM_FBDM_MODELS, *HSPM_BARM_MODELS}
+HSPM_MODELS = {*HSPM_ONLY_MODELS, *HSPM_BARM_MODELS}
 BARM_MODELS = {"CMUNeXt_BARM", *HSPM_BARM_MODELS}
-BASE_SEG_MODELS = {HSPM_FBDM_BEST0616_MODEL, *HSPM_BARM_MODELS}
+BASE_SEG_MODELS = {*HSPM_BARM_MODELS}
 
 
 def parse_gag_stages(value):
@@ -110,49 +90,7 @@ def parse_ddsr_stages(value):
     return tuple(stages)
 
 
-def parse_fbdm_stages(value):
-    if isinstance(value, (tuple, list)):
-        items = value
-    else:
-        items = str(value).split(",")
-
-    stages = []
-    for item in items:
-        item = str(item).strip()
-        if not item:
-            raise argparse.ArgumentTypeError(
-                "fbdm_stages must be 0, 1, or a comma-separated pair 0,1."
-            )
-        try:
-            stage = int(item)
-        except ValueError as exc:
-            raise argparse.ArgumentTypeError(
-                "fbdm_stages values must be integers 0 and/or 1."
-            ) from exc
-        if stage not in {0, 1}:
-            raise argparse.ArgumentTypeError("fbdm_stages values must be 0 and/or 1.")
-        if stage not in stages:
-            stages.append(stage)
-
-    normalized = tuple(sorted(stages))
-    if normalized not in {(0,), (1,), (0, 1)}:
-        raise argparse.ArgumentTypeError("fbdm_stages must be one of: 0, 1, or 0,1.")
-    return normalized
-
-
 def apply_best0616_presets(args):
-    if args.model in {
-        FBDM_BEST0616_MODEL,
-        HSPM_FBDM_BEST0616_MODEL,
-        HSPM_FBDM_0619_MODEL,
-    }:
-        args.fbdm_edge_aux_only = True
-        args.fbdm_gate_init = 0.01
-        args.fbdm_gate_max = 0.06
-        args.fbdm_edge_loss_weight = 0.03
-        args.fbdm_edge_loss_final_weight = 0.003
-        args.fbdm_edge_loss_decay_epochs = 150
-        args.fbdm_residual_warmup_epochs = 40
     if args.model == HSPM_BEST0616_MODEL:
         args.hspm_mode = "full"
         args.hspm_backbone_mode = "dual_path"
@@ -181,35 +119,6 @@ def apply_best0616_presets(args):
         args.hspm_coarse_loss_weight = 0.1
         args.hspm_coarse_loss_final_weight = 0.02
         args.hspm_coarse_loss_decay_epochs = 150
-    if args.model in {HSPM_FBDM_BEST0616_MODEL, HSPM_FBDM_0619_MODEL}:
-        args.hspm_mode = "full"
-        args.hspm_backbone_mode = "dual_path"
-        args.hspm_fusion_mode = "global"
-        args.hspm_mixer_mode = "bounded"
-        args.hspm_gamma_init = 0.1
-        args.hspm_gamma_max = 0.35
-        args.hspm_temperature = 0.1
-        args.hspm_prototype_dropout = 0.0
-        args.hspm_fusion_gate_init = 0.05
-        args.hspm_fusion_gate_max = 0.3
-        args.hspm_coarse_loss_weight = 0.1
-        args.hspm_coarse_loss_final_weight = 0.02
-        args.hspm_coarse_loss_decay_epochs = 150
-    if args.model == HSPM_FBDM_BEST0616_MODEL:
-        args.fbdm_edge_loss_type = "balanced_bce_dice"
-        args.fbdm_edge_kernel_size = 5
-        args.fbdm_correction_scale_init = 0.05
-        args.fbdm_correction_scale_max = 0.20
-        args.fbdm_boundary_gate_floor = 0.20
-    if args.model == HSPM_FBDM_0619_MODEL:
-        args.fbdm_edge_loss_type = "balanced_bce_dice"
-        args.fbdm_edge_pos_weight = 20.0
-        args.fbdm_edge_kernel_size = 3
-        args.fbdm_stages = (0, 1)
-        args.fbdm_x2_edge_ratio = 0.3
-        args.fbdm_boundary_band_loss_weight = 0.0
-        args.fbdm_boundary_band_loss_final_weight = None
-        args.fbdm_boundary_band_loss_decay_epochs = 0
     return args
 
 
@@ -251,18 +160,6 @@ def build_model(args, parser):
             barm_gate_max=args.barm_gate_max,
             barm_hf_keep_init=args.barm_hf_keep_init,
         )
-    elif args.model == "CMUNeXt_FBDM":
-        model = cmunext_fbdm(
-            num_classes=args.num_classes,
-            fbdm_gate_init=args.fbdm_gate_init,
-            fbdm_gate_max=args.fbdm_gate_max,
-            fbdm_edge_aux_only=args.fbdm_edge_aux_only,
-        )
-    elif args.model == FBDM_BEST0616_MODEL:
-        model = cmunext_fbdm_best0616(
-            num_classes=args.num_classes,
-            fbdm_stages=args.fbdm_stages,
-        )
     elif args.model == "CMUNeXt_HSPM":
         model = cmunext_hspm(
             num_classes=args.num_classes,
@@ -283,73 +180,6 @@ def build_model(args, parser):
         model = cmunext_hspm_best0616(num_classes=args.num_classes)
     elif args.model == HSPM_BEST0619_MODEL:
         model = cmunext_hspm_best0619(num_classes=args.num_classes)
-    elif args.model == HSPM_FBDM_BEST0616_MODEL:
-        model = cmunext_hspm_fbdm_best0616(
-            num_classes=args.num_classes,
-            hspm_gamma_init=args.hspm_gamma_init,
-            hspm_gamma_max=args.hspm_gamma_max,
-            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
-            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
-            fbdm_semantic_uncertainty_weight=args.fbdm_semantic_uncertainty_weight,
-            fbdm_semantic_coarse_weight=args.fbdm_semantic_coarse_weight,
-            fbdm_semantic_gate_base=args.fbdm_semantic_gate_base,
-            fbdm_gate_init=args.fbdm_gate_init,
-            fbdm_gate_max=args.fbdm_gate_max,
-            fbdm_correction_scale_init=args.fbdm_correction_scale_init,
-            fbdm_correction_scale_max=args.fbdm_correction_scale_max,
-            fbdm_boundary_gate_floor=args.fbdm_boundary_gate_floor,
-        )
-    elif args.model == HSPM_FBDM_0619_MODEL:
-        model = cmunext_hspm_fbdm_0619(num_classes=args.num_classes)
-    elif args.model == "CMUNeXt_HSPM_FBDM":
-        model = cmunext_hspm_fbdm(
-            num_classes=args.num_classes,
-            hspm_mode=args.hspm_mode,
-            hspm_mixer_mode=args.hspm_mixer_mode,
-            hspm_gamma_init=args.hspm_gamma_init,
-            hspm_gamma_max=args.hspm_gamma_max,
-            hspm_temperature=args.hspm_temperature,
-            hspm_prototype_dropout=args.hspm_prototype_dropout,
-            hspm_backbone_mode=args.hspm_backbone_mode,
-            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
-            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
-            hspm_fusion_mode=args.hspm_fusion_mode,
-            hspm_small_area_threshold=args.hspm_small_area_threshold,
-            hspm_small_area_temperature=args.hspm_small_area_temperature,
-            fbdm_use_hspm_prior=not args.fbdm_no_hspm_prior,
-            fbdm_detach_hspm_prior=not args.fbdm_no_detach_hspm_prior,
-            fbdm_semantic_uncertainty_weight=args.fbdm_semantic_uncertainty_weight,
-            fbdm_semantic_coarse_weight=args.fbdm_semantic_coarse_weight,
-            fbdm_semantic_gate_base=args.fbdm_semantic_gate_base,
-            fbdm_gate_init=args.fbdm_gate_init,
-            fbdm_gate_max=args.fbdm_gate_max,
-            fbdm_edge_aux_only=args.fbdm_edge_aux_only,
-        )
-    elif args.model == "CMUNeXt_HSPM_FBDM_V2":
-        model = cmunext_hspm_fbdm_v2(
-            num_classes=args.num_classes,
-            hspm_mode=args.hspm_mode,
-            hspm_mixer_mode=args.hspm_mixer_mode,
-            hspm_gamma_init=args.hspm_gamma_init,
-            hspm_gamma_max=args.hspm_gamma_max,
-            hspm_temperature=args.hspm_temperature,
-            hspm_prototype_dropout=args.hspm_prototype_dropout,
-            hspm_backbone_mode=args.hspm_backbone_mode,
-            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
-            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
-            hspm_fusion_mode=args.hspm_fusion_mode,
-            hspm_small_area_threshold=args.hspm_small_area_threshold,
-            hspm_small_area_temperature=args.hspm_small_area_temperature,
-            fbdm_use_hspm_prior=not args.fbdm_no_hspm_prior,
-            fbdm_detach_hspm_prior=not args.fbdm_no_detach_hspm_prior,
-            fbdm_semantic_uncertainty_weight=args.fbdm_semantic_uncertainty_weight,
-            fbdm_semantic_coarse_weight=args.fbdm_semantic_coarse_weight,
-            fbdm_semantic_gate_base=args.fbdm_semantic_gate_base,
-            fbdm_gate_init=args.fbdm_gate_init,
-            fbdm_gate_max=args.fbdm_gate_max,
-            fbdm_correction_scale_init=args.fbdm_correction_scale_init,
-            fbdm_correction_scale_max=args.fbdm_correction_scale_max,
-        )
     elif args.model == "CMUNeXt_DualGAG":
         model = cmunext_dualgag(num_classes=args.num_classes, gag_stages=args.gag_stages)
     elif args.model == "CMUNeXt_BA_DualGAG":
@@ -677,8 +507,6 @@ def validate(model, val_loader, criterion, device, args, save_dir="validation_re
                     loss_outputs = dict(outputs)
                     loss_outputs["seg"] = seg_logits
                 loss = criterion(loss_outputs, label_batch)
-            elif args.model in FBDM_ONLY_MODELS:
-                loss = criterion(outputs, label_batch)
             else:
                 loss = criterion(seg_logits, label_batch)
             probabilities = torch.sigmoid(seg_logits).detach().cpu()
@@ -769,7 +597,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Validation script for medical image segmentation")
 
     model_choices = [
-        "CMUNet", "CMUNeXt", "CMUNeXt_BARM", HSPM_BARM_MODEL, HSPM_BARM_HFBYPASS_MODEL, "CMUNeXt_FBDM", FBDM_BEST0616_MODEL, "CMUNeXt_HSPM", HSPM_BEST0616_MODEL, HSPM_BEST0619_MODEL, "CMUNeXt_HSPM_FBDM", HSPM_FBDM_BEST0616_MODEL, HSPM_FBDM_0619_MODEL, "CMUNeXt_HSPM_FBDM_V2",
+        "CMUNet", "CMUNeXt", "CMUNeXt_BARM", HSPM_BARM_MODEL, HSPM_BARM_HFBYPASS_MODEL, "CMUNeXt_HSPM", HSPM_BEST0616_MODEL, HSPM_BEST0619_MODEL,
         "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
         "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
         "CMUNeXt_BA_DualGAG_SpeckleEnhance",
@@ -780,7 +608,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_path", type=str, default="./checkpoint/U_Net_model.pth",
                         help="Path to the trained model")
     parser.add_argument("--use_base_seg", action="store_true",
-                        help="Evaluate protected HSPM base logits instead of FBDM-corrected logits")
+                        help="Evaluate model base logits when available")
     parser.add_argument("--base_dir", type=str, default="./data/test", help="base directory of dataset")
     parser.add_argument("--train_file_dir", type=str, default="train.txt",
                         help="(Required by MedicalDataSets) train file directory")
@@ -864,55 +692,6 @@ if __name__ == "__main__":
                         help="Training-only compatibility option")
     parser.add_argument("--hspm_coarse_loss_decay_epochs", type=int, default=0,
                         help="Training-only compatibility option")
-    parser.add_argument("--fbdm_no_hspm_prior", action="store_true",
-                        help="Disable HSPM coarse/uncertainty priors inside CMUNeXt_HSPM_FBDM")
-    parser.add_argument("--fbdm_no_detach_hspm_prior", action="store_true",
-                        help="Allow FBDM gradients to flow into HSPM priors; default keeps priors detached")
-    parser.add_argument("--fbdm_semantic_uncertainty_weight", type=float, default=0.7,
-                        help="Uncertainty weight in the FBDM semantic boundary prior")
-    parser.add_argument("--fbdm_semantic_coarse_weight", type=float, default=0.3,
-                        help="Coarse probability weight in the FBDM semantic boundary prior")
-    parser.add_argument("--fbdm_semantic_gate_base", type=float, default=0.7,
-                        help="Conservative base term in the FBDM boundary gate")
-    parser.add_argument("--fbdm_gate_init", type=float, default=0.03,
-                        help="Initial effective FBDM residual strength")
-    parser.add_argument("--fbdm_gate_max", type=float, default=0.2,
-                        help="Maximum effective FBDM residual strength")
-    parser.add_argument("--fbdm_edge_aux_only", action="store_true",
-                        help="Use FBDM only as an edge auxiliary branch without residual injection")
-    parser.add_argument("--fbdm_stages", type=parse_fbdm_stages, default=(0,),
-                        help="Best0616 edge supervision stages: 0, 1, or 0,1")
-    parser.add_argument("--fbdm_x2_edge_ratio", type=float, default=0.30,
-                        help="Relative x2/x1 edge-loss weight when Best0616 uses stages 0,1")
-    parser.add_argument("--fbdm_edge_loss_type", type=str, default="legacy",
-                        choices=["legacy", "balanced_bce_dice", "focal_dice"],
-                        help="Edge supervision loss used by FBDM models")
-    parser.add_argument("--fbdm_edge_pos_weight", type=float, default=20.0,
-                        help="Positive-class weight for balanced FBDM edge BCE")
-    parser.add_argument("--fbdm_edge_focal_alpha", type=float, default=0.95,
-                        help="Positive-class alpha for focal FBDM edge loss")
-    parser.add_argument("--fbdm_edge_focal_gamma", type=float, default=2.0,
-                        help="Focusing gamma for focal FBDM edge loss")
-    parser.add_argument("--fbdm_edge_loss_weight", type=float, default=0.05,
-                        help="Auxiliary edge loss weight for FBDM models")
-    parser.add_argument("--fbdm_edge_kernel_size", type=int, default=3,
-                        help="Odd kernel size used to build edge supervision masks for FBDM models")
-    parser.add_argument("--fbdm_correction_scale_init", type=float, default=0.05,
-                        help="Initial effective bounded logit-correction scale for FBDM V2")
-    parser.add_argument("--fbdm_correction_scale_max", type=float, default=0.3,
-                        help="Maximum effective bounded logit-correction scale for FBDM V2")
-    parser.add_argument("--fbdm_boundary_gate_floor", type=float, default=0.0,
-                        help="Minimum boundary gate used by protected FBDM correction")
-    parser.add_argument("--fbdm_correction_warmup_epochs", type=int, default=40,
-                        help="Training-only compatibility option; inference uses full correction scale")
-    parser.add_argument("--fbdm_boundary_band_loss_weight", type=float, default=0.0,
-                        help="Boundary-band loss weight for FBDM V2 evaluation")
-    parser.add_argument("--fbdm_boundary_band_loss_final_weight", type=float, default=None,
-                        help="Training-only compatibility option")
-    parser.add_argument("--fbdm_boundary_band_loss_decay_epochs", type=int, default=0,
-                        help="Training-only compatibility option")
-    parser.add_argument("--fbdm_boundary_band_kernel_size", type=int, default=7,
-                        help="Odd kernel size used to build GT boundary bands for FBDM V2 evaluation")
     parser.add_argument("--early_stop_patience", type=int, default=0,
                         help="Training-only compatibility option")
     parser.add_argument("--early_stop_min_delta", type=float, default=0.001,
@@ -939,47 +718,6 @@ if __name__ == "__main__":
     if args.use_base_seg and args.model not in BASE_SEG_MODELS:
         parser.error("--use_base_seg is only supported by models that output base_seg.")
 
-    if args.fbdm_semantic_uncertainty_weight < 0 or args.fbdm_semantic_coarse_weight < 0:
-        parser.error("FBDM semantic prior weights must be non-negative.")
-    if not 0.0 <= args.fbdm_semantic_gate_base <= 1.0:
-        parser.error("--fbdm_semantic_gate_base must be in [0, 1].")
-    if not 0.0 < args.fbdm_gate_init < args.fbdm_gate_max:
-        parser.error("--fbdm_gate_init must be in (0, --fbdm_gate_max).")
-    if args.fbdm_edge_loss_weight < 0:
-        parser.error("--fbdm_edge_loss_weight must be non-negative.")
-    if args.fbdm_edge_pos_weight <= 0:
-        parser.error("--fbdm_edge_pos_weight must be positive.")
-    if not 0.0 < args.fbdm_edge_focal_alpha < 1.0:
-        parser.error("--fbdm_edge_focal_alpha must be in (0, 1).")
-    if args.fbdm_edge_focal_gamma < 0:
-        parser.error("--fbdm_edge_focal_gamma must be non-negative.")
-    if not 0.0 < args.fbdm_x2_edge_ratio <= 1.0:
-        parser.error("--fbdm_x2_edge_ratio must be in (0, 1].")
-    if args.fbdm_edge_kernel_size <= 0 or args.fbdm_edge_kernel_size % 2 == 0:
-        parser.error("--fbdm_edge_kernel_size must be a positive odd integer.")
-    if not 0.0 < args.fbdm_correction_scale_init < args.fbdm_correction_scale_max:
-        parser.error("--fbdm_correction_scale_init must be in (0, --fbdm_correction_scale_max).")
-    if not 0.0 <= args.fbdm_boundary_gate_floor < 1.0:
-        parser.error("--fbdm_boundary_gate_floor must be in [0, 1).")
-    if args.fbdm_correction_warmup_epochs < 0:
-        parser.error("--fbdm_correction_warmup_epochs must be non-negative.")
-    if args.fbdm_boundary_band_loss_weight < 0:
-        parser.error("--fbdm_boundary_band_loss_weight must be non-negative.")
-    if (
-        args.fbdm_boundary_band_loss_final_weight is not None
-        and args.fbdm_boundary_band_loss_final_weight < 0
-    ):
-        parser.error("--fbdm_boundary_band_loss_final_weight must be non-negative.")
-    if args.fbdm_boundary_band_loss_decay_epochs < 0:
-        parser.error("--fbdm_boundary_band_loss_decay_epochs must be non-negative.")
-    if args.fbdm_boundary_band_kernel_size <= 0 or args.fbdm_boundary_band_kernel_size % 2 == 0:
-        parser.error("--fbdm_boundary_band_kernel_size must be a positive odd integer.")
-    boundary_band_enabled = args.fbdm_boundary_band_loss_weight > 0 or (
-        args.fbdm_boundary_band_loss_final_weight is not None
-        and args.fbdm_boundary_band_loss_final_weight > 0
-    )
-    if boundary_band_enabled and args.model not in HSPM_FBDM_CORRECTION_MODELS:
-        parser.error("--fbdm_boundary_band_loss_weight requires a logit-correction model.")
     if not 0.0 < args.barm_gate_init < args.barm_gate_max:
         parser.error("--barm_gate_init must be in (0, --barm_gate_max).")
     if not 0.0 < args.barm_hf_keep_init < 1.0:
@@ -1043,29 +781,6 @@ if __name__ == "__main__":
             edge_weight=args.barm_edge_loss_weight,
             edge_band_width=args.barm_edge_band_width,
             edge_pos_weight=args.barm_edge_pos_weight,
-        ).to(device)
-    elif args.model in HSPM_FBDM_MODELS:
-        criterion = losses.__dict__["HSPMFBDMLoss"](
-            coarse_weight=args.hspm_coarse_loss_weight,
-            edge_weight=args.fbdm_edge_loss_weight,
-            edge_kernel_size=args.fbdm_edge_kernel_size,
-            boundary_band_weight=args.fbdm_boundary_band_loss_weight,
-            boundary_band_kernel_size=args.fbdm_boundary_band_kernel_size,
-            edge_loss_type=args.fbdm_edge_loss_type,
-            edge_pos_weight=args.fbdm_edge_pos_weight,
-            edge_focal_alpha=args.fbdm_edge_focal_alpha,
-            edge_focal_gamma=args.fbdm_edge_focal_gamma,
-            x2_edge_ratio=args.fbdm_x2_edge_ratio,
-        ).to(device)
-    elif args.model in FBDM_ONLY_MODELS:
-        criterion = losses.__dict__["FBDMLoss"](
-            edge_weight=args.fbdm_edge_loss_weight,
-            edge_kernel_size=args.fbdm_edge_kernel_size,
-            x2_edge_ratio=args.fbdm_x2_edge_ratio,
-            edge_loss_type=args.fbdm_edge_loss_type,
-            edge_pos_weight=args.fbdm_edge_pos_weight,
-            edge_focal_alpha=args.fbdm_edge_focal_alpha,
-            edge_focal_gamma=args.fbdm_edge_focal_gamma,
         ).to(device)
     elif args.model in HSPM_ONLY_MODELS:
         criterion = losses.__dict__["HSPMLoss"](coarse_weight=args.hspm_coarse_loss_weight).to(device)
