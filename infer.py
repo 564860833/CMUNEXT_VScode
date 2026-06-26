@@ -21,6 +21,7 @@ from src.network.conv_based.CMUNeXt_USLGSF import cmunext_uslgsf
 from src.network.conv_based.CMUNeXt_USLGSF_V2 import cmunext_uslgsf_v2
 from src.network.conv_based.CMUNeXt_USLGSF_V3 import cmunext_uslgsf_v3
 from src.network.conv_based.CMUNeXt_HSPM import cmunext_hspm
+from src.network.conv_based.CMUNeXt_HSPM_BARM import cmunext_hspm_barm
 from src.network.conv_based.CMUNeXt_HSPM_Best0616 import cmunext_hspm_best0616
 from src.network.conv_based.CMUNeXt_HSPM_Best0619 import cmunext_hspm_best0619
 from src.network.conv_based.CMUNeXt_HSPM_FBDM import cmunext_hspm_fbdm, cmunext_hspm_fbdm_v2
@@ -57,9 +58,12 @@ FBDM_BEST0616_MODEL = "CMUNeXt_FBDM_Best0616"
 HSPM_BEST0616_MODEL = "CMUNeXt_HSPM_Best0616"
 HSPM_BEST0619_MODEL = "CMUNeXt_HSPM_Best0619"
 FBDM_ONLY_MODELS = {"CMUNeXt_FBDM", FBDM_BEST0616_MODEL}
+HSPM_BARM_MODEL = "CMUNeXt_HSPM_BARM"
+HSPM_BARM_MODELS = {HSPM_BARM_MODEL}
 HSPM_ONLY_MODELS = {"CMUNeXt_HSPM", HSPM_BEST0616_MODEL, HSPM_BEST0619_MODEL}
-HSPM_MODELS = {*HSPM_ONLY_MODELS, *HSPM_FBDM_MODELS}
-BARM_MODELS = {"CMUNeXt_BARM"}
+HSPM_MODELS = {*HSPM_ONLY_MODELS, *HSPM_FBDM_MODELS, *HSPM_BARM_MODELS}
+BARM_MODELS = {"CMUNeXt_BARM", *HSPM_BARM_MODELS}
+BASE_SEG_MODELS = {HSPM_FBDM_BEST0616_MODEL, *HSPM_BARM_MODELS}
 
 
 def parse_gag_stages(value):
@@ -267,6 +271,25 @@ def build_model(args, parser):
     elif args.model == "CMUNeXt_BARM":
         model = cmunext_barm(
             num_classes=args.num_classes,
+            barm_gate_init=args.barm_gate_init,
+            barm_gate_max=args.barm_gate_max,
+            barm_hf_keep_init=args.barm_hf_keep_init,
+        )
+    elif args.model == HSPM_BARM_MODEL:
+        model = cmunext_hspm_barm(
+            num_classes=args.num_classes,
+            hspm_mode=args.hspm_mode,
+            hspm_mixer_mode=args.hspm_mixer_mode,
+            hspm_gamma_init=args.hspm_gamma_init,
+            hspm_gamma_max=args.hspm_gamma_max,
+            hspm_temperature=args.hspm_temperature,
+            hspm_prototype_dropout=args.hspm_prototype_dropout,
+            hspm_backbone_mode=args.hspm_backbone_mode,
+            hspm_fusion_gate_init=args.hspm_fusion_gate_init,
+            hspm_fusion_gate_max=args.hspm_fusion_gate_max,
+            hspm_fusion_mode=args.hspm_fusion_mode,
+            hspm_small_area_threshold=args.hspm_small_area_threshold,
+            hspm_small_area_temperature=args.hspm_small_area_temperature,
             barm_gate_init=args.barm_gate_init,
             barm_gate_max=args.barm_gate_max,
             barm_hf_keep_init=args.barm_hf_keep_init,
@@ -714,7 +737,13 @@ def validate(model, val_loader, criterion, device, args, save_dir="validation_re
             outputs = forward_with_model(model, args.model, img_batch)
             use_base_seg = getattr(args, "use_base_seg", False)
             seg_logits = get_seg_logits(outputs, use_base_seg=use_base_seg)
-            if args.model in BARM_MODELS:
+            if args.model in HSPM_BARM_MODELS:
+                loss_outputs = outputs
+                if use_base_seg and isinstance(outputs, dict):
+                    loss_outputs = dict(outputs)
+                    loss_outputs["seg"] = seg_logits
+                loss = criterion(loss_outputs, label_batch)
+            elif args.model in BARM_MODELS:
                 loss = criterion(outputs, label_batch)
             elif args.model in HSPM_MODELS:
                 loss_outputs = outputs
@@ -814,7 +843,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Validation script for medical image segmentation")
 
     model_choices = [
-        "CMUNet", "CMUNeXt", "CMUNeXt_BARM", "CMUNeXt_FBDM", FBDM_BEST0616_MODEL, "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", HSPM_BEST0616_MODEL, HSPM_BEST0619_MODEL, "CMUNeXt_HSPM_FBDM", HSPM_FBDM_BEST0616_MODEL, HSPM_FBDM_0619_MODEL, "CMUNeXt_HSPM_FBDM_V2",
+        "CMUNet", "CMUNeXt", "CMUNeXt_BARM", HSPM_BARM_MODEL, "CMUNeXt_FBDM", FBDM_BEST0616_MODEL, "CMUNeXt_USLGSF", "CMUNeXt_USLGSF_V2", "CMUNeXt_USLGSF_V3", "CMUNeXt_HSPM", HSPM_BEST0616_MODEL, HSPM_BEST0619_MODEL, "CMUNeXt_HSPM_FBDM", HSPM_FBDM_BEST0616_MODEL, HSPM_FBDM_0619_MODEL, "CMUNeXt_HSPM_FBDM_V2",
         "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
         "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
         "CMUNeXt_BA_DualGAG_SpeckleEnhance",
@@ -880,6 +909,16 @@ if __name__ == "__main__":
                         help="GT boundary band half-width for CMUNeXt_BARM edge supervision")
     parser.add_argument("--barm_edge_pos_weight", type=float, default=10.0,
                         help="Positive-class weight for CMUNeXt_BARM edge BCE")
+    parser.add_argument("--hspm_barm_base_loss_weight", type=float, default=0.3,
+                        help="Base HSPM segmentation preservation loss weight for CMUNeXt_HSPM_BARM")
+    parser.add_argument("--hspm_barm_boundary_loss_weight", type=float, default=0.1,
+                        help="Boundary-band Dice loss weight for CMUNeXt_HSPM_BARM")
+    parser.add_argument("--hspm_barm_edge_loss_weight", type=float, default=0.05,
+                        help="Boundary-band edge supervision loss weight for CMUNeXt_HSPM_BARM")
+    parser.add_argument("--hspm_barm_edge_band_width", type=int, default=2,
+                        help="GT boundary band half-width for CMUNeXt_HSPM_BARM edge supervision")
+    parser.add_argument("--hspm_barm_edge_pos_weight", type=float, default=10.0,
+                        help="Positive-class weight for CMUNeXt_HSPM_BARM edge BCE")
     parser.add_argument("--hspm_mode", type=str, default="full", choices=["full", "context_only"],
                         help="Enable the full HSPM or keep only its high-resolution context bottleneck")
     parser.add_argument("--hspm_coarse_loss_weight", type=float, default=0.3,
@@ -986,8 +1025,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     apply_best0616_presets(args)
 
-    if args.use_base_seg and args.model != HSPM_FBDM_BEST0616_MODEL:
-        parser.error("--use_base_seg is only supported by CMUNeXt_HSPM_FBDM_Best0616.")
+    if args.use_base_seg and args.model not in BASE_SEG_MODELS:
+        parser.error("--use_base_seg is only supported by models that output base_seg.")
 
     if args.fbdm_semantic_uncertainty_weight < 0 or args.fbdm_semantic_coarse_weight < 0:
         parser.error("FBDM semantic prior weights must be non-negative.")
@@ -1046,6 +1085,16 @@ if __name__ == "__main__":
         parser.error("--barm_edge_band_width must be positive.")
     if args.barm_edge_pos_weight <= 0:
         parser.error("--barm_edge_pos_weight must be positive.")
+    if (
+        args.hspm_barm_base_loss_weight < 0
+        or args.hspm_barm_boundary_loss_weight < 0
+        or args.hspm_barm_edge_loss_weight < 0
+    ):
+        parser.error("HSPM-BARM loss weights must be non-negative.")
+    if args.hspm_barm_edge_band_width < 1:
+        parser.error("--hspm_barm_edge_band_width must be positive.")
+    if args.hspm_barm_edge_pos_weight <= 0:
+        parser.error("--hspm_barm_edge_pos_weight must be positive.")
     if args.visual_mode == "selected" and not args.visual_case:
         parser.error("--visual_case is required when --visual_mode selected")
 
@@ -1067,7 +1116,16 @@ if __name__ == "__main__":
     )
     val_loader = DataLoader(db_val, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
-    if args.model in BARM_MODELS:
+    if args.model in HSPM_BARM_MODELS:
+        criterion = losses.__dict__["HSPMBARMLoss"](
+            base_weight=args.hspm_barm_base_loss_weight,
+            coarse_weight=args.hspm_coarse_loss_weight,
+            boundary_weight=args.hspm_barm_boundary_loss_weight,
+            edge_weight=args.hspm_barm_edge_loss_weight,
+            edge_band_width=args.hspm_barm_edge_band_width,
+            edge_pos_weight=args.hspm_barm_edge_pos_weight,
+        ).to(device)
+    elif args.model in BARM_MODELS:
         criterion = losses.__dict__["CMUNeXtBARMLoss"](
             coarse_weight=args.barm_coarse_loss_weight,
             boundary_weight=args.barm_boundary_loss_weight,

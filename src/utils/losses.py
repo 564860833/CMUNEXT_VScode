@@ -10,6 +10,7 @@ __all__ = [
     'BoundaryAwareSegLoss',
     'HSPMLoss',
     'CMUNeXtBARMLoss',
+    'HSPMBARMLoss',
     'EdgeSupervisionLoss',
     'FBDMLoss',
     'HSPMFBDMLoss',
@@ -223,6 +224,87 @@ class CMUNeXtBARMLoss(nn.Module):
             return total
         return total, {
             "seg": seg,
+            "coarse_weighted": coarse_weighted,
+            "boundary_weighted": boundary_weighted,
+            "edge_weighted": edge_weighted,
+            "total": total,
+        }
+
+
+class HSPMBARMLoss(nn.Module):
+    def __init__(
+        self,
+        base_weight=0.3,
+        coarse_weight=0.1,
+        boundary_weight=0.1,
+        edge_weight=0.05,
+        edge_band_width=2,
+        edge_pos_weight=10.0,
+    ):
+        super().__init__()
+        if min(base_weight, coarse_weight, boundary_weight, edge_weight) < 0:
+            raise ValueError("HSPM-BARM loss weights must be non-negative.")
+        if edge_band_width < 1:
+            raise ValueError("edge_band_width must be positive.")
+        if edge_pos_weight <= 0:
+            raise ValueError("edge_pos_weight must be positive.")
+        self.base_weight = float(base_weight)
+        self.coarse_weight = float(coarse_weight)
+        self.boundary_weight = float(boundary_weight)
+        self.edge_weight = float(edge_weight)
+        self.edge_kernel_size = int(2 * edge_band_width + 1)
+        self.seg_loss = BCEDiceLoss()
+        self.register_buffer("edge_pos_weight", torch.tensor([float(edge_pos_weight)]))
+
+    def forward(self, outputs, target, coarse_weight=None, return_components=False):
+        if not isinstance(outputs, dict):
+            raise TypeError("HSPMBARMLoss expects model outputs to be a dictionary.")
+        required_keys = {"seg", "base_seg", "coarse", "edge"}
+        missing_keys = required_keys.difference(outputs)
+        if missing_keys:
+            raise KeyError(
+                "HSPMBARMLoss requires output keys: "
+                f"{sorted(required_keys)}."
+            )
+
+        target = target.to(device=outputs["seg"].device, dtype=outputs["seg"].dtype)
+        current_coarse_weight = self.coarse_weight if coarse_weight is None else float(coarse_weight)
+        if current_coarse_weight < 0:
+            raise ValueError("coarse_weight must be non-negative.")
+
+        seg = self.seg_loss(outputs["seg"], target)
+        base = self.seg_loss(outputs["base_seg"], target)
+        coarse_target = F.interpolate(target, size=outputs["coarse"].shape[-2:], mode="nearest")
+        coarse = self.seg_loss(outputs["coarse"], coarse_target)
+        band = mask_to_edge(target, kernel_size=self.edge_kernel_size).detach()
+        if band.shape[-2:] != outputs["seg"].shape[-2:]:
+            band = F.interpolate(band, size=outputs["seg"].shape[-2:], mode="nearest")
+        boundary = _boundary_region_dice_loss(outputs["seg"], target, band)
+
+        edge_target = band
+        if edge_target.shape[-2:] != outputs["edge"].shape[-2:]:
+            edge_target = F.interpolate(
+                edge_target,
+                size=outputs["edge"].shape[-2:],
+                mode="nearest",
+            )
+        edge_target = edge_target.to(device=outputs["edge"].device, dtype=outputs["edge"].dtype)
+        edge = F.binary_cross_entropy_with_logits(
+            outputs["edge"],
+            edge_target,
+            pos_weight=self.edge_pos_weight.to(dtype=outputs["edge"].dtype),
+        )
+
+        base_weighted = self.base_weight * base
+        coarse_weighted = current_coarse_weight * coarse
+        boundary_weighted = self.boundary_weight * boundary
+        edge_weighted = self.edge_weight * edge
+        total = seg + base_weighted + coarse_weighted + boundary_weighted + edge_weighted
+        if not return_components:
+            return total
+        return total, {
+            "seg": seg,
+            "base_weighted": base_weighted,
             "coarse_weighted": coarse_weighted,
             "boundary_weighted": boundary_weighted,
             "edge_weighted": edge_weighted,
