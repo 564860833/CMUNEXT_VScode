@@ -45,7 +45,9 @@ from src.network.conv_based.CMUNeXt_BA_DualGAG_SpeckleEnhance import cmunext_ba_
 from src.network.conv_based.CMUNeXt_DualGAG import cmunext_dualgag
 from src.network.conv_based.CMUNeXt_SpeckleEnhance import cmunext_speckle
 from src.network.conv_based.CMUNeXt_DualGAG_SpeckleEnhance import cmunext_dualgag_speckleenhance
+from src.network.conv_based.MA_UNet import ma_unet
 from src.network.conv_based.MK_UNet import MK_UNet
+from src.network.conv_based.TM_UNet import tm_unet
 
 
 
@@ -169,7 +171,7 @@ parser.add_argument('--model', type=str, default="CMUNeXt",
                              "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
                              "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
                              "CMUNeXt_BA_DualGAG_SpeckleEnhance",
-                             "CMUNet", "MK_UNet", "AttU_Net", "TransUnet", "R2U_Net", "U_Net",
+                             "CMUNet", "MK_UNet", "MA_UNet", "TM_UNet", "AttU_Net", "TransUnet", "R2U_Net", "U_Net",
                              "UNext", "UNetplus", "UNet3plus", "SwinUnet", "MedT", "TransUnet"], help='model')
 parser.add_argument('--base_dir', type=str, default="./data/busi", help='dir')
 parser.add_argument('--train_file_dir', type=str, default="busi_train.txt", help='dir')
@@ -178,6 +180,8 @@ parser.add_argument('--base_lr', type=float, default=0.01, help='segmentation ne
 parser.add_argument('--batch_size', type=int, default=4, help='batch_size per gpu')
 parser.add_argument('--epoch', type=int, default=300, help='train epoch')
 parser.add_argument('--img_size', type=int, default=256, help='img size of per batch')
+parser.add_argument('--tmunet_size', type=str, default="b", choices=["t", "s", "b"],
+                    help='TM-UNet size: t=tiny, s=small, b=base')
 parser.add_argument('--num_classes', type=int, default=1, help='seg num_classes')
 parser.add_argument('--seed', type=int, default=41, help='random seed')
 parser.add_argument('--save_dir', type=str, default="./checkpoint", help='directory to save the best model')
@@ -303,6 +307,15 @@ def get_model(args):
         model = CMUNet(output_ch=args.num_classes).cuda()
     elif args.model == "MK_UNet":
         model = MK_UNet(num_classes=args.num_classes, in_channels=3).cuda()
+    elif args.model == "MA_UNet":
+        model = ma_unet(input_channel=3, num_classes=args.num_classes).cuda()
+    elif args.model == "TM_UNet":
+        model = tm_unet(
+            input_channel=3,
+            num_classes=args.num_classes,
+            img_size=args.img_size,
+            model_size=args.tmunet_size,
+        ).cuda()
     elif args.model == "CMUNeXt":
         model = cmunext(num_classes=args.num_classes).cuda()
     elif args.model == "CMUNeXt_BARM":

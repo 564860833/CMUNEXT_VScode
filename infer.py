@@ -24,7 +24,9 @@ from src.network.conv_based.CMUNeXt_BA_DualGAG_SpeckleEnhance import cmunext_ba_
 from src.network.conv_based.CMUNeXt_DualGAG import cmunext_dualgag
 from src.network.conv_based.CMUNeXt_DualGAG_SpeckleEnhance import cmunext_dualgag_speckleenhance
 from src.network.conv_based.CMUNeXt_SpeckleEnhance import cmunext_speckle
+from src.network.conv_based.MA_UNet import ma_unet
 from src.network.conv_based.MK_UNet import MK_UNet
+from src.network.conv_based.TM_UNet import tm_unet
 from src.network.conv_based.U_Net import U_Net
 from src.network.conv_based.UNet3plus import UNet3plus
 from src.network.conv_based.UNetplus import ResNet34UnetPlus
@@ -127,6 +129,15 @@ def build_model(args, parser):
         model = CMUNet(output_ch=args.num_classes)
     elif args.model == "MK_UNet":
         model = MK_UNet(num_classes=args.num_classes, in_channels=3)
+    elif args.model == "MA_UNet":
+        model = ma_unet(input_channel=3, num_classes=args.num_classes)
+    elif args.model == "TM_UNet":
+        model = tm_unet(
+            input_channel=3,
+            num_classes=args.num_classes,
+            img_size=args.img_size,
+            model_size=args.tmunet_size,
+        )
     elif args.model == "CMUNeXt":
         model = cmunext(num_classes=args.num_classes)
     elif args.model == "CMUNeXt_BARM":
@@ -601,7 +612,7 @@ if __name__ == "__main__":
         "CMUNeXt_DualGAG", "CMUNeXt_BA_DualGAG",
         "CMUNeXt_SpeckleEnhance", "CMUNeXt_DualGAG_SpeckleEnhance",
         "CMUNeXt_BA_DualGAG_SpeckleEnhance",
-        "U_Net", "MK_UNet", "AttU_Net", "UNext", "UNetplus", "UNet3plus",
+        "U_Net", "MK_UNet", "MA_UNet", "TM_UNet", "AttU_Net", "UNext", "UNetplus", "UNet3plus",
         "TransUnet", "SwinUnet", "MedT", "Mobile_U_ViT",
     ]
     parser.add_argument("--model", type=str, default="U_Net", choices=model_choices, help="model type")
@@ -614,6 +625,8 @@ if __name__ == "__main__":
                         help="(Required by MedicalDataSets) train file directory")
     parser.add_argument("--val_file_dir", type=str, default="test_val.txt", help="validation file list")
     parser.add_argument("--img_size", type=int, default=256, help="image size")
+    parser.add_argument("--tmunet_size", type=str, default="b", choices=["t", "s", "b"],
+                        help="TM-UNet size: t=tiny, s=small, b=base")
     parser.add_argument("--num_classes", type=int, default=1, help="number of classes")
     parser.add_argument("--batch_size", type=int, default=1, help="batch size")
     parser.add_argument("--ddsr_stages", type=parse_ddsr_stages, default=(0, 1),
