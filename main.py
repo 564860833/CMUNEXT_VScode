@@ -414,8 +414,14 @@ def get_model(args):
     elif args.model == "Mobile_U_ViT":
         model = mobileuvit(out_channel=args.num_classes).cuda()
     else:
-        model = get_transformer_based_model(parser=parser, model_name=args.model, img_size=args.img_size,
-                                            num_classes=args.num_classes, in_ch=3).cuda()
+        model = get_transformer_based_model(
+            parser=parser,
+            model_name=args.model,
+            img_size=args.img_size,
+            num_classes=args.num_classes,
+            in_ch=3,
+            load_pretrained=args.model == "SwinUnet",
+        ).cuda()
     return model
 
 

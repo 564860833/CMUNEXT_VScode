@@ -1,10 +1,46 @@
+from pathlib import Path
+
 from .transUnet.transunet import TransUnet
 from .swinUnet.vision_transformer import SwinUnet
 from .swinUnet.config import get_config
 from .medicalT.axialnet import MedT
 
 
-def get_transformer_based_model(parser, model_name: str, img_size: int, num_classes: int, in_ch: int):
+def _resolve_swin_pretrained_path(config, cfg_path):
+    pretrained_path = config.MODEL.PRETRAIN_CKPT
+    if pretrained_path is None:
+        return config
+
+    path = Path(pretrained_path)
+    if path.is_absolute():
+        resolved_path = path
+    else:
+        cwd_path = (Path.cwd() / path).resolve()
+        cfg_relative_path = (Path(cfg_path).resolve().parent / path).resolve()
+        if cwd_path.exists():
+            resolved_path = cwd_path
+        elif cfg_relative_path.exists():
+            resolved_path = cfg_relative_path
+        else:
+            raise FileNotFoundError(
+                "SwinUnet pretrained checkpoint not found. Tried: "
+                f"{cwd_path} and {cfg_relative_path}"
+            )
+
+    config.defrost()
+    config.MODEL.PRETRAIN_CKPT = str(resolved_path)
+    config.freeze()
+    return config
+
+
+def get_transformer_based_model(
+    parser,
+    model_name: str,
+    img_size: int,
+    num_classes: int,
+    in_ch: int,
+    load_pretrained: bool = False,
+):
     if model_name == "MedT":
         model = MedT(img_size=img_size, imgchan=in_ch, num_classes=num_classes)
     elif model_name == "SwinUnet":
@@ -35,8 +71,12 @@ def get_transformer_based_model(parser, model_name: str, img_size: int, num_clas
                             help='Perform evaluation only')
         parser.add_argument('--throughput', action='store_true',
                             help='Test throughput only')
-        config = get_config(parser.parse_args())
+        parsed_args = parser.parse_args()
+        config = get_config(parsed_args)
         model = SwinUnet(config, img_size=224, num_classes=num_classes)
+        if load_pretrained:
+            config = _resolve_swin_pretrained_path(config, parsed_args.cfg)
+            model.load_from(config)
     elif model_name == "TransUnet":
         model = TransUnet(img_ch=in_ch, output_ch=num_classes)
     else:
