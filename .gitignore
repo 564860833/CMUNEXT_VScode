@@ -58,3 +58,6 @@ htmlcov/
 
 # Codex scratch workspace
 .codex-scratch/
+
+# Claude Code scratch workspace
+.claude-scratch/
