@@ -45,12 +45,53 @@ from src.network.conv_based.MA_UNet import ma_unet
 from src.network.conv_based.MK_UNet import MK_UNet
 from src.network.conv_based.TM_UNet import tm_unet
 from src.network.hybrid_based.Mobile_U_ViT import mobileuvit
+from src.network.transfomer_based.transUnet.transunet import TransUnet
+from src.network.transfomer_based.swinUnet.config import get_config as get_swin_config
+from src.network.transfomer_based.swinUnet.vision_transformer import SwinUnet
 
 
 HSPM_BEST0616_MODEL = "CMUNeXt_HSPM_Best0616"
 HSPM_BEST0619_MODEL = "CMUNeXt_HSPM_Best0619"
 HSPM_BARM_MODEL = "CMUNeXt_HSPM_BARM"
 HSPM_BARM_HFBYPASS_MODEL = "CMUNeXt_HSPM_BARM_HFBypass"
+TRANSUNET_MODEL = "TransUnet"
+SWIN_UNET_MODEL = "SwinUnet"
+TRANSUNET_INPUT_SIZE = 256
+SWIN_UNET_INPUT_SIZE = 224
+
+
+def get_model_img_size(model_name, default_img_size):
+    """返回固定输入架构所需的图像尺寸。"""
+    if model_name == TRANSUNET_MODEL:
+        return TRANSUNET_INPUT_SIZE
+    if model_name == SWIN_UNET_MODEL:
+        return SWIN_UNET_INPUT_SIZE
+    return default_img_size
+
+
+def build_swin_unet(num_classes=1):
+    """使用仓库内的 224x224 配置构建 Swin-Unet。"""
+    config_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "src", "network", "transfomer_based", "swinUnet",
+        "swin_tiny_patch4_window7_224_lite.yaml",
+    )
+    config_args = argparse.Namespace(
+        cfg=config_path,
+        opts=None,
+        batch_size=None,
+        zip=False,
+        cache_mode="part",
+        resume=None,
+        accumulation_steps=None,
+        use_checkpoint=False,
+        amp_opt_level="O1",
+        tag=None,
+        eval=False,
+        throughput=False,
+    )
+    config = get_swin_config(config_args)
+    return SwinUnet(config, img_size=SWIN_UNET_INPUT_SIZE, num_classes=num_classes)
 
 
 def build_model(model_name, num_classes=1, img_size=256):
@@ -89,6 +130,10 @@ def build_model(model_name, num_classes=1, img_size=256):
         return tm_unet(input_channel=3, num_classes=num_classes, img_size=img_size, model_size="b")
     elif model_name == "Mobile_U_ViT":
         return mobileuvit(out_channel=num_classes)
+    elif model_name == TRANSUNET_MODEL:
+        return TransUnet(img_ch=3, output_ch=num_classes)
+    elif model_name == SWIN_UNET_MODEL:
+        return build_swin_unet(num_classes=num_classes)
     else:
         raise ValueError(f"Unsupported model: {model_name}")
 
@@ -260,7 +305,7 @@ def save_results(results, output_dir):
     # 保存为 CSV
     csv_path = os.path.join(output_dir, "benchmark_results.csv")
     fieldnames = [
-        "model", "device", "batch_size", "params_M",
+        "model", "device", "batch_size", "img_size", "params_M",
         "mean_latency_ms", "std_latency_ms", "fps", "peak_memory_mb"
     ]
 
@@ -361,7 +406,7 @@ def main():
     parser.add_argument("--val_file_dir", type=str, default="busi_val.txt",
                         help="验证集文件列表（仅 mode=real 时需要）")
     parser.add_argument("--img_size", type=int, default=256,
-                        help="输入图像尺寸")
+                        help="默认输入图像尺寸（TransUnet 固定为 256，SwinUnet 固定为 224）")
     parser.add_argument("--num_samples", type=int, default=100,
                         help="测试样本数量")
 
@@ -376,7 +421,7 @@ def main():
                         help="测试迭代次数")
 
     # 输出
-    parser.add_argument("--output_dir", type=str, default="./.claude-scratch",
+    parser.add_argument("--output_dir", type=str, default="./.codex-scratch",
                         help="结果输出目录")
 
     args = parser.parse_args()
@@ -392,42 +437,52 @@ def main():
     print(f"Device: {device}")
     print(f"Mode: {args.mode}")
     print(f"Batch size: {args.batch_size}")
-    print(f"Image size: {args.img_size}x{args.img_size}")
+    print(f"Default image size: {args.img_size}x{args.img_size}")
     print(f"Test samples: {args.num_samples}")
     print(f"Models: {', '.join(model_names)}")
     print(f"{'='*60}\n")
 
-    # 创建数据加载器
-    if args.mode == "synthetic":
-        print("Creating synthetic dataloader...")
-        dataloader = create_synthetic_dataloader(
-            args.batch_size, args.img_size, args.num_samples, device
-        )
-    else:
-        print("Creating real dataloader...")
-        dataloader = create_real_dataloader(
-            args.base_dir, args.val_file_dir, args.batch_size, args.img_size, args.num_samples
-        )
-
     # 测试每个模型
     all_results = []
+    dataloaders = {}
 
     for model_name in model_names:
+        model_img_size = get_model_img_size(model_name, args.img_size)
         print(f"\n{'='*60}")
         print(f"Testing model: {model_name}")
+        print(f"Input size: {model_img_size}x{model_img_size}")
         print(f"{'='*60}")
 
         try:
+            # 按输入尺寸复用数据加载器；SwinUnet 使用独立的 224x224 输入。
+            if model_img_size not in dataloaders:
+                print(f"Creating {args.mode} dataloader for {model_img_size}x{model_img_size} inputs...")
+                if args.mode == "synthetic":
+                    dataloaders[model_img_size] = create_synthetic_dataloader(
+                        args.batch_size, model_img_size, args.num_samples, device
+                    )
+                else:
+                    dataloaders[model_img_size] = create_real_dataloader(
+                        args.base_dir,
+                        args.val_file_dir,
+                        args.batch_size,
+                        model_img_size,
+                        args.num_samples,
+                    )
+            dataloader = dataloaders[model_img_size]
+
             # 构建模型
-            model = build_model(model_name, num_classes=1, img_size=args.img_size)
+            model = build_model(model_name, num_classes=1, img_size=model_img_size)
 
             # 加载预训练权重
             if not args.no_pretrained:
                 checkpoint_path = find_model_checkpoint(model_name, args.model_dir)
                 if checkpoint_path:
                     print(f"Loading checkpoint: {checkpoint_path}")
-                    state_dict = torch.load(checkpoint_path, map_location=device)
+                    # 先加载到 CPU，避免临时 state_dict 占用 GPU 并污染峰值显存统计。
+                    state_dict = torch.load(checkpoint_path, map_location="cpu")
                     model.load_state_dict(state_dict)
+                    del state_dict
                 else:
                     print(f"Warning: No checkpoint found for {model_name}, using random weights")
             else:
@@ -451,6 +506,7 @@ def main():
             results["model"] = model_name
             results["device"] = str(device)
             results["batch_size"] = args.batch_size
+            results["img_size"] = model_img_size
             results["params_M"] = params
 
             # 打印结果
@@ -487,12 +543,13 @@ def main():
         print(f"\n{'='*60}")
         print("Summary Table")
         print(f"{'='*60}")
-        print(f"{'Model':<30} {'FPS':>8} {'Latency(ms)':>12} {'Memory(MB)':>12}")
-        print(f"{'-'*60}")
+        print(f"{'Model':<30} {'Input':>9} {'FPS':>8} {'Latency(ms)':>12} {'Memory(MB)':>12}")
+        print(f"{'-'*71}")
         for result in all_results:
-            print(f"{result['model']:<30} {result['fps']:>8.2f} "
+            input_size = f"{result['img_size']}x{result['img_size']}"
+            print(f"{result['model']:<30} {input_size:>9} {result['fps']:>8.2f} "
                   f"{result['mean_latency_ms']:>12.2f} {result['peak_memory_mb']:>12.2f}")
-        print(f"{'='*60}\n")
+        print(f"{'='*71}\n")
 
         print(f"[SUCCESS] All results saved to: {output_dir}")
     else:
